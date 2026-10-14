@@ -1,0 +1,20 @@
+# Pebble build output
+build/
+.lock-waf_*
+node_modules/
+
+# Python
+venv/
+__pycache__/
+
+# the Sketchfab download (39 MB) and its unzipped copy: see CREDITS.md
+portal_turret.zip
+model/
+
+# downloaded voice clips (see tools/convert_audio.py)
+wav/
+
+# temporary files from tools/capture_store.py
+store/screenshots/.*
+
+.claude/

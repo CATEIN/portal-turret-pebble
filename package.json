@@ -1,0 +1,48 @@
+{
+  "name": "portal-turret",
+  "author": "CATEIN",
+  "version": "1.0.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Portal Turret",
+    "uuid": "4f9f79be-8724-41b3-ae4a-686dd44e2791",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "emery",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": true
+    },
+    "capabilities": [
+      "configurable"
+    ],
+    "messageKeys": [
+      "SHOW_TIME",
+      "VOLUME",
+      "ROOM"
+    ],
+    "resources": {
+      "media": [
+        {
+          "type": "raw",
+          "name": "TURRET_MODEL",
+          "file": "turret.bin"
+        },
+        {
+          "type": "raw",
+          "name": "VOICES",
+          "file": "voices.bin",
+          "targetPlatforms": [
+            "emery"
+          ]
+        }
+      ]
+    }
+  }
+}
