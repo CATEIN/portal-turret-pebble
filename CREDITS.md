@@ -28,6 +28,7 @@ same CC BY 4.0 license:
 
 - `resources/turret.bin` (made by `tools/convert_model.py`)
 - the turret picture in `src/pkjs/turret_view.js` (made by `tools/render_view.py`)
+- the turret icon (`resources/images/menu_icon.png`, `store/icon-*.png`, made by `tools/make_icon.py`)
 - the turret in the screenshots, GIFs and banners in `store/`
 
 The original model download (`portal_turret.zip`) is not included in this

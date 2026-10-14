@@ -59,13 +59,14 @@ The generated files are committed, so this is only needed to change them. The Py
 - **Voice lines** (`resources/voices.bin`, `src/c/voices.h`): save the clips from the [Portal Wiki](https://theportalwiki.com/wiki/Turret_voice_lines) into a folder (file names in `tools/convert_audio.py`), then `python3 tools/convert_audio.py path/to/wavs resources/voices.bin src/c/voices.h`
 - **Store screenshots and GIFs** (`store/screenshots/`): `venv/bin/python tools/capture_store.py` (uses the emulator; takes a while)
 - **Store banners** (`store/banner-*.png`): `venv/bin/python tools/make_store_assets.py`
+- **Icon** (`resources/images/menu_icon.png` for the watch's menu, `store/icon-*.png`): `venv/bin/python tools/make_icon.py`
 
 ## Layout
 
     src/c/main.c          the watchface: camera, rasterizer, eye, room, laser, animation, settings
     src/c/audio.c         voice line playback (Time 2)
     src/pkjs/             phone side: the settings page and sending settings to the watch
-    resources/            turret.bin (the model), voices.bin (the sounds)
+    resources/            turret.bin (the model), voices.bin (the sounds), the menu icon
     tools/                asset converters and store asset tools
     store/                appstore listing, screenshots, GIFs and banners
 

@@ -7,6 +7,7 @@ For the Repebble appstore. Assets are in this folder; regenerate them with
 - **Name:** Portal Turret
 - **Type:** Watchface
 - **Platforms:** Pebble Time 2 (emery), Pebble Round 2 (gabbro)
+- **Icons** (optional for watchfaces): `icon-large.png` (144x144), `icon-small.png` (48x48)
 - **Banner** (720x320, one per platform): `banner-dark.png` or `banner-light.png`
 - **Screenshots** (unframed, at display size, max 5 per platform):
   - emery: `screenshots/emery-flick.gif`, `screenshots/emery-eye.png`, `screenshots/emery-turret.png`, `screenshots/emery-chamber.png`
