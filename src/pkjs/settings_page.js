@@ -19,7 +19,7 @@ var CSS = [
   '.hint{color:var(--muted);font-size:13px;margin:8px 0 0}',
   'input[type=checkbox]{width:22px;height:22px;accent-color:var(--accent)}',
   'input[type=range]{width:100%;accent-color:var(--accent);margin:12px 0 0}',
-  '#vol{font-weight:600;min-width:48px;text-align:right}',
+  '#vol,#see,#defect,#explode,#fire{font-weight:600;min-width:48px;text-align:right}',
   'canvas{width:100%;height:auto;display:block;border-radius:10px;touch-action:manipulation;background:#000;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}',
   '.btns{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}',
   '.btns button{flex:1;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit;font-size:14px}',
@@ -29,7 +29,7 @@ var CSS = [
 var SCRIPT = function () {
   /* global SETTINGS, VIEW */
   var WALL_COLS = 8, WALL_ROWS = 4, FLOOR_COLS = 16, FLOOR_ROWS = 7;
-  var WALL_Z = -1.25, PANEL = 0.9, TILE = 0.45, NEAR = 1.6;
+  var WALL_Z = -1.25, PANEL = 0.9, TILE = 0.45, NEAR = 1.9;
   var X0 = -(WALL_COLS / 2) * PANEL - PANEL / 2;
 
   var room = SETTINGS.room.slice();
@@ -321,9 +321,29 @@ var SCRIPT = function () {
   }
   volume.oninput = volText;
   volText();
+  var seeChance = document.getElementById('seeChance');
+  var seeLabel = document.getElementById('see');
+  seeChance.value = SETTINGS.seeChance;
+  function seeText() {
+    seeLabel.textContent = seeChance.value + '%';
+  }
+  seeChance.oninput = seeText;
+  seeText();
+  if (!SETTINGS.lite) [['defectChance', 'defect'], ['explodeChance', 'explode'], ['fireChance', 'fire']].forEach(function (ids) {
+    var slider = document.getElementById(ids[0]), label = document.getElementById(ids[1]);
+    slider.value = SETTINGS[ids[0]];
+    slider.oninput = function () { label.textContent = slider.value + '%'; };
+    slider.oninput();
+  });
 
   document.getElementById('save').onclick = function () {
-    var result = { showTime: showTime.checked, volume: +volume.value, room: room };
+    var result = { showTime: showTime.checked, volume: +volume.value, seeChance: +seeChance.value,
+                   room: room };
+    if (!SETTINGS.lite) {
+      result.defectChance = +document.getElementById('defectChance').value;
+      result.explodeChance = +document.getElementById('explodeChance').value;
+      result.fireChance = +document.getElementById('fireChance').value;
+    }
     location.href = 'pebblejs://close#' + encodeURIComponent(JSON.stringify(result));
   };
 
@@ -336,10 +356,11 @@ function scriptJson(value) {
 }
 
 module.exports = function (settings, view) {
+  var name = settings.lite ? 'Portal Turret Lite' : 'Portal Turret';
   return '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-    '<title>Portal Turret</title><style>' + CSS + '</style></head><body>' +
-    '<h1>Portal Turret</h1><p class="sub">Settings for the watchface</p>' +
+    '<title>' + name + '</title><style>' + CSS + '</style></head><body>' +
+    '<h1>' + name + '</h1><p class="sub">Settings for the watchface</p>' +
 
     '<h2>Clock</h2><div class="card"><label class="row" for="showTime">' +
     '<span>Show the time under the eye</span><input type="checkbox" id="showTime"></label></div>' +
@@ -347,6 +368,22 @@ module.exports = function (settings, view) {
     '<h2>Sounds</h2><div class="card"><div class="row"><span>Volume</span><span id="vol"></span></div>' +
     '<input type="range" id="volume" min="0" max="100" step="10">' +
     '<p class="hint">Voice lines and panel sounds, on Pebble Time 2 only. 0% turns them off.</p></div>' +
+
+    '<h2>Turret</h2><div class="card"><div class="row"><span>Chance of turret seeing you</span><span id="see"></span></div>' +
+    '<input type="range" id="seeChance" min="0" max="100" step="5">' +
+    '<p class="hint">Each time you flick it awake, the turret may spot you. It locks on and opens fire: ' +
+    'flick again before it gets you to knock it over.</p>' +
+    (!settings.lite ?
+    '<div class="row" style="margin-top:16px"><span>Chance of a defective turret</span><span id="defect"></span></div>' +
+    '<input type="range" id="defectChance" min="0" max="100" step="5">' +
+    '<p class="hint">The one from Portal 2. Picked again each time the claw brings a new turret. ' +
+    'It has no bullets.</p>' +
+    '<div class="row" style="margin-top:16px"><span>Chance of it exploding</span><span id="explode"></span></div>' +
+    '<input type="range" id="explodeChance" min="0" max="100" step="5">' +
+    '<p class="hint">When a defective turret tries to shoot you.</p>' +
+    '<div class="row" style="margin-top:16px"><span>Chance of it catching fire</span><span id="fire"></span></div>' +
+    '<input type="range" id="fireChance" min="0" max="100" step="5">' +
+    '<p class="hint">After it tries to shoot you. Then it panics, and explodes.</p>' : '') + '</div>' +
 
     '<h2>Test chamber</h2><div class="card">' +
     '<canvas id="room"></canvas>' +

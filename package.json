@@ -1,7 +1,7 @@
 {
   "name": "portal-turret",
   "author": "CATEIN",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "keywords": [
     "pebble-app"
   ],
@@ -25,7 +25,11 @@
     "messageKeys": [
       "SHOW_TIME",
       "VOLUME",
-      "ROOM"
+      "ROOM",
+      "SEE_CHANCE",
+      "DEFECT_CHANCE",
+      "EXPLODE_CHANCE",
+      "FIRE_CHANCE"
     ],
     "resources": {
       "media": [
@@ -33,6 +37,21 @@
           "type": "raw",
           "name": "TURRET_MODEL",
           "file": "turret.bin"
+        },
+        {
+          "type": "raw",
+          "name": "TURRET_DEFECTIVE",
+          "file": "turret_defective.bin"
+        },
+        {
+          "type": "raw",
+          "name": "CLOSEUP",
+          "file": "closeup.bin"
+        },
+        {
+          "type": "raw",
+          "name": "CLOSEUP_DEFECTIVE",
+          "file": "closeup_defective.bin"
         },
         {
           "type": "raw",

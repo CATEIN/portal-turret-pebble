@@ -3,6 +3,11 @@
 
 var settingsPage = require('./settings_page');
 var view = require('./turret_view');
+var keys = require('message_keys');
+
+// Portal Turret Lite has no defective turret: it leaves out its settings
+// (and their message keys, see lite/package.json)
+var LITE = keys.DEFECT_CHANCE === undefined;
 
 var SETTINGS_KEY = 'settings2';
 var OLD_SETTINGS_KEY = 'settings';  // a 0/1 per tile, before tiles could split
@@ -29,7 +34,8 @@ function defaultRoom() {
 }
 
 function settings() {
-  var s = { showTime: true, volume: 70, room: defaultRoom() };
+  var s = { showTime: true, volume: 70, seeChance: 25, defectChance: 15, explodeChance: 100, fireChance: 50,
+            room: defaultRoom() };
   try {
     var saved = JSON.parse(localStorage.getItem(SETTINGS_KEY));
     var old = !saved;
@@ -37,6 +43,10 @@ function settings() {
     if (saved) {
       if (typeof saved.showTime === 'boolean') s.showTime = saved.showTime;
       if (typeof saved.volume === 'number') s.volume = saved.volume;
+      if (typeof saved.seeChance === 'number') s.seeChance = saved.seeChance;
+      if (typeof saved.defectChance === 'number') s.defectChance = saved.defectChance;
+      if (typeof saved.explodeChance === 'number') s.explodeChance = saved.explodeChance;
+      if (typeof saved.fireChance === 'number') s.fireChance = saved.fireChance;
       if (saved.room && saved.room.length === ROOM_TILES) {
         s.room = saved.room.map(function (v) { return old ? (v ? TILE_DARK : 0) : v & 0x1F; });
       }
@@ -50,6 +60,7 @@ function settings() {
 Pebble.addEventListener('showConfiguration', function () {
   var s = settings();
   s.defaultRoom = defaultRoom();
+  s.lite = LITE;
   Pebble.openURL('data:text/html;charset=utf-8,' + encodeURIComponent(settingsPage(s, view)));
 });
 
@@ -65,15 +76,26 @@ Pebble.addEventListener('webviewclosed', function (e) {
   var clean = {
     showTime: !!s.showTime,
     volume: Math.max(0, Math.min(100, Math.round(+s.volume || 0))),
+    seeChance: Math.max(0, Math.min(100, Math.round(+s.seeChance || 0))),
+    defectChance: Math.max(0, Math.min(100, Math.round(+s.defectChance || 0))),
+    explodeChance: Math.max(0, Math.min(100, Math.round(+s.explodeChance || 0))),
+    fireChance: Math.max(0, Math.min(100, Math.round(+s.fireChance || 0))),
     room: (s.room && s.room.length === ROOM_TILES) ? s.room.map(function (v) { return (v | 0) & 0x1F; })
                                                    : defaultRoom()
   };
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(clean));
-  Pebble.sendAppMessage({
+  var msg = {
     SHOW_TIME: clean.showTime ? 1 : 0,
     VOLUME: clean.volume,
+    SEE_CHANCE: clean.seeChance,
     ROOM: clean.room
-  }, function () {}, function () {
+  };
+  if (!LITE) {
+    msg.DEFECT_CHANCE = clean.defectChance;
+    msg.EXPLODE_CHANCE = clean.explodeChance;
+    msg.FIRE_CHANCE = clean.fireChance;
+  }
+  Pebble.sendAppMessage(msg, function () {}, function () {
     console.log('Failed to send settings');
   });
 });

@@ -8,7 +8,13 @@
 // show the whole turret, then its side panels slide open (the kick rocks
 // it onto one foot and back until it settles) and it scans the room, sweeping the
 // panels and its laser sight around. After a few seconds
-// it all reverses.
+// it all reverses. Flick again while it's out and it gets knocked over: it
+// fires wildly, shuts down, and a claw carries it off and lowers a new one.
+// Sometimes (a setting) it spots you while scanning: it locks on and opens
+// fire, and only knocking it over saves you. Some turrets (another setting)
+// are the defective one from Portal 2: no bullets, just clicks, and it may
+// blow itself up trying. Portal Turret Lite (lite/package.json) is built from
+// the same code without the defective turret's model and voice lines.
 //
 // The turret is a flat-shaded low-poly mesh (resources/turret.bin, produced by
 // tools/convert_model.py) drawn straight into the framebuffer with a
@@ -28,6 +34,16 @@
 
 #include "audio.h"
 #include "voices.h"
+
+// the defective turret is in when its resources are (not in Portal Turret Lite)
+#ifdef RESOURCE_ID_TURRET_DEFECTIVE
+#define HAS_DEFECTIVE 1
+#define MODEL_RES (s_defective ? RESOURCE_ID_TURRET_DEFECTIVE : RESOURCE_ID_TURRET_MODEL)
+#define CLOSEUP_RES (s_defective ? RESOURCE_ID_CLOSEUP_DEFECTIVE : RESOURCE_ID_CLOSEUP)
+#else
+#define MODEL_RES RESOURCE_ID_TURRET_MODEL
+#define CLOSEUP_RES RESOURCE_ID_CLOSEUP
+#endif
 
 // ---------------------------------------------------------------------------
 // Model resource layout (little-endian, see tools/convert_model.py)
@@ -66,6 +82,10 @@ typedef struct __attribute__((packed)) {
 // The header is tiny and always resident; the rest is loaded on demand.
 static ModelHeader s_hdr;
 static bool s_hdr_ok;
+static bool s_defective;  // the defective turret (Portal 2) instead of the regular one
+// the regular turret's size and middle: the zoomed-out view is framed by these
+// whichever turret is there, so it doesn't jump when the claw swaps types
+static float s_frame_height, s_frame_width, s_frame_center[3];
 
 static uint8_t *s_body;
 static const int16_t *s_verts;    // nverts * 3
@@ -138,13 +158,34 @@ static uint32_t s_scan_ms; // time spent scanning, drives the sweep
 static int32_t s_tip_ms = TIP_MS; // time since the panels started opening, drives the rocking
 static int s_tip_dir;      // +1 leans left first, -1 right
 
-// the whole turret's sideways lean this frame (about z, through a foot)
-static int32_t s_roll_s, s_roll_c, s_roll_px;
+// the whole turret's sideways lean this frame (about z, through a foot),
+// then a lift (the claw carrying it, or to keep it lying on the floor)
+static int32_t s_roll_s, s_roll_c, s_roll_px, s_roll_ang, s_lift_q;
 static bool s_roll_on;
+static float s_wings;      // panel opening this frame (0 closed .. 1 open)
+
+// Spotted (see "Spotted" below)
+static bool s_spot_armed;    // this flick, it will spot you...
+static int32_t s_spot_at;    // ... this far into its scan (ms)
+static int32_t s_spot_ms = -1;  // time since it spotted you; -1: it hasn't
+static int32_t s_spot_y0, s_spot_p0;  // where it was looking when it spotted you
+static bool s_laser_off;     // after getting you: no laser until the next flick
+
+// Knocked over (see "Knock-over" below): everything follows from the time
+// since the knock
+static bool s_ko;          // knocked over, until the new turret is in place
+static int32_t s_ko_ms;
+static int s_ko_dir;       // +1 falls to the left (counter-clockwise), -1 right
+static int32_t s_ko_view;  // 0..1000: camera pulled back to take it all in
+static int32_t s_ko_cx;    // where the fallen turret's middle comes to rest (x, q units)
 static bool s_out;         // heading out (zoomed out, panels open)
 static uint64_t s_hold_until;
 static uint64_t s_last_ms;
 static uint32_t s_sway_ms; // time spent zoomed out, drives the sway
+static int s_sway_dir = 1; // which way the camera pans first: +1 or -1, rolled each flick
+
+// +1 or -1 at random (from a high bit: rand()'s lowest bit can just alternate)
+static int flip(void) { return (rand() >> 8) & 1 ? 1 : -1; }
 
 static struct tm s_now;
 static char s_time_buf[8];
@@ -166,14 +207,38 @@ static char s_time_buf[8];
 #define TILE_DARK 0x0F
 
 #define SETTINGS_KEY 1
-#define SETTINGS_VERSION 2
+#define SETTINGS_VERSION 5
 
 typedef struct __attribute__((packed)) {
   uint8_t version;
   uint8_t show_time;           // the time under the eye
   uint8_t volume;              // 0..100, 0 = silent
   uint8_t room[ROOM_TILES];
+  uint8_t see_chance;          // 0..100: % of flicks where it spots you
+  uint8_t defect_chance;       // 0..100: % of turrets that are defective
+  uint8_t explode_chance;      // 0..100: % of times a defective one blows up trying to shoot
+  uint8_t fire_chance;         // 0..100: % of times it catches fire first (and then blows up)
 } Settings;
+
+// version 4: no fire
+typedef struct __attribute__((packed)) {
+  uint8_t version, show_time, volume;
+  uint8_t room[ROOM_TILES];
+  uint8_t see_chance, defect_chance, explode_chance;
+} SettingsV4;
+
+// version 3: no defective turrets
+typedef struct __attribute__((packed)) {
+  uint8_t version, show_time, volume;
+  uint8_t room[ROOM_TILES];
+  uint8_t see_chance;
+} SettingsV3;
+
+// version 2: no see_chance
+typedef struct __attribute__((packed)) {
+  uint8_t version, show_time, volume;
+  uint8_t room[ROOM_TILES];
+} SettingsV2;
 
 // version 1: a bit per tile
 #define ROOM_BYTES_V1 ((ROOM_TILES + 7) / 8)
@@ -191,6 +256,10 @@ static void default_settings(void) {
   s_cfg.version = SETTINGS_VERSION;
   s_cfg.show_time = 1;
   s_cfg.volume = 70;
+  s_cfg.see_chance = 25;
+  s_cfg.defect_chance = 15;
+  s_cfg.explode_chance = 100;
+  s_cfg.fire_chance = 50;
   for (int r = 0; r < WALL_ROWS; r++) {
     for (int c = 5; c < WALL_COLS; c++) s_cfg.room[r * WALL_COLS + c] = TILE_DARK;
   }
@@ -203,10 +272,22 @@ static void default_settings(void) {
 
 static void load_settings(void) {
   default_settings();
-  union { Settings v2; SettingsV1 v1; } saved;
+  union { Settings v5; SettingsV4 v4; SettingsV3 v3; SettingsV2 v2; SettingsV1 v1; } saved;
   int n = persist_read_data(SETTINGS_KEY, &saved, sizeof(saved));
-  if (n == (int)sizeof(Settings) && saved.v2.version == SETTINGS_VERSION) {
-    s_cfg = saved.v2;
+  if (n == (int)sizeof(Settings) && saved.v5.version == SETTINGS_VERSION) {
+    s_cfg = saved.v5;
+  } else if (n == (int)sizeof(SettingsV4) && saved.v4.version == 4) {
+    memcpy(&s_cfg, &saved.v4, sizeof(SettingsV4));  // the same, plus fire_chance
+    s_cfg.version = SETTINGS_VERSION;
+  } else if (n == (int)sizeof(SettingsV3) && saved.v3.version == 3) {
+    s_cfg.show_time = saved.v3.show_time;
+    s_cfg.volume = saved.v3.volume;
+    memcpy(s_cfg.room, saved.v3.room, ROOM_TILES);
+    s_cfg.see_chance = saved.v3.see_chance;
+  } else if (n == (int)sizeof(SettingsV2) && saved.v2.version == 2) {
+    s_cfg.show_time = saved.v2.show_time;
+    s_cfg.volume = saved.v2.volume;
+    memcpy(s_cfg.room, saved.v2.room, ROOM_TILES);
   } else if (n == (int)sizeof(SettingsV1) && saved.v1.version == 1) {
     s_cfg.show_time = saved.v1.show_time;
     s_cfg.volume = saved.v1.volume;
@@ -248,7 +329,8 @@ static float ease_back_out(int32_t p) {
 }
 
 static bool animating(void) {
-  return s_out || s_zoom_p > 0 || s_wing_p > 0 || s_scan_p > 0 || s_tip_ms < TIP_MS;
+  return s_out || s_zoom_p > 0 || s_wing_p > 0 || s_scan_p > 0 || s_tip_ms < TIP_MS
+         || s_ko || s_ko_view > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +355,7 @@ static bool ensure_model(void) {
   if (s_body) return true;
   if (!s_hdr_ok) return false;
   audio_pump();
-  ResHandle rh = resource_get_handle(RESOURCE_ID_TURRET_MODEL);
+  ResHandle rh = resource_get_handle(MODEL_RES);
   size_t size = resource_size(rh) - sizeof(ModelHeader);
   s_body = malloc(size);
   s_sv = malloc(sizeof(ScreenVert) * s_hdr.nverts);
@@ -308,7 +390,7 @@ static bool ensure_model(void) {
 }
 
 static void load_header(void) {
-  ResHandle rh = resource_get_handle(RESOURCE_ID_TURRET_MODEL);
+  ResHandle rh = resource_get_handle(MODEL_RES);
   resource_load_byte_range(rh, 0, (uint8_t *)&s_hdr, sizeof(ModelHeader));
   s_hdr_ok = memcmp(s_hdr.magic, MODEL_MAGIC, 4) == 0
              && s_hdr.ntris < (1 << IDX_BITS);
@@ -347,7 +429,10 @@ static inline void project(int32_t x, int32_t y, int32_t z, ScreenVert *out) {
   }
   int32_t zc = s_cam.dist - dz;
   if (zc < s_cam.dist / 16) zc = s_cam.dist / 16;
-  int64_t f = s_cam.k12 / zc;
+  // k12 / zc through a 32-bit reciprocal: no 64-bit division (it has no
+  // hardware, and this runs for every vertex)
+  uint32_t inv = 0x80000000u / (uint32_t)zc;
+  int64_t f = (s_cam.k12 * inv) >> 31;
   out->x = s_cam.cx256 + (int32_t)(((int64_t)(x - s_cam.tx) * f) >> 12);
   out->y = s_cam.cy256 - (int32_t)(((int64_t)dy * f) >> 12);
   out->z = zc;
@@ -399,23 +484,149 @@ static int32_t tip_angle(void) {
   return (int32_t)(s_tip_dir * (float)TIP_MAX * decay * sin_lookup(ph) / TRIG_MAX_RATIO);
 }
 
-static void setup_roll(void) {
-  int32_t a = tip_angle();
-  s_roll_on = a != 0;
-  s_roll_s = sin_lookup(a);
-  s_roll_c = cos_lookup(a);
-  // it rocks on the foot it leans towards
-  float foot = TIP_FOOT * (a > 0 ? -1 : 1);
-  s_roll_px = (int32_t)((s_hdr.center[0] + foot) / s_hdr.vscale);
+// ---------------------------------------------------------------------------
+// Knock-over: a flick while the turret is out tips it onto its side. It fires
+// blindly while it falls and lies there, says something, powers down and
+// folds its panels. A second later a claw comes down, grabs it, lifts it
+// away and lowers a fresh turret, which powers up; then the view zooms back
+// in. All of it is a function of the time since the knock (ms):
+
+#define KO_FALL 520         // falling over (accelerating)
+#define KO_FIRE_END 2600    // firing from the fall until here
+#define KO_DOWN_END 3600    // powered down (eye and laser fade out)
+#define KO_GRAB 4600        // a second later the claw comes down
+#define KO_GRIP 5500        // ... closes on it
+#define KO_LIFT 5750        // ... and lifts it away
+#define KO_SWAP 6750        // out of sight: now it brings the new turret
+#define KO_PLACE 7750       // ... sets it down, lets go
+#define KO_POWER 7950       // the new turret powers up
+#define KO_UP 8400          // the claw goes back up
+#define KO_END 9100
+#define KO_ANGLE (TRIG_MAX_ANGLE * 82 / 360)   // lying on its side, propped on a panel
+#define KO_SETTLE (TRIG_MAX_ANGLE * 10 / 360)  // ... and further once the panels fold away
+#define KO_SAG 2850         // panels folding: it starts to tip further
+#define KO_SAGGED 3350      // ... and lands
+#define BODY_HW 0.32f       // half the turret's width without the panels (model units)
+#define KO_HIGH 5.0f        // model units above the floor: out of sight
+#define KO_FIRE_EVERY 420   // the fire sound is a burst of 4 shots this long
+
+static float ramp(int32_t t, int32_t a, int32_t b) {
+  return t <= a ? 0.0f : t >= b ? 1.0f : (float)(t - a) / (b - a);
 }
 
-// lean a model-space point (the feet are at y = 0)
+static float smooth(float x) {
+  return x * x * (3 - 2 * x);
+}
+
+// fall angle, counter-clockwise for s_ko_dir = +1
+static int32_t ko_angle(void) {
+  if (!s_ko || s_ko_ms >= KO_SWAP) return 0;
+  float a;
+  if (s_ko_ms < KO_FALL) {
+    float x = (float)s_ko_ms / KO_FALL;
+    a = x * x;                                  // tips slowly, then fast
+  } else {
+    // bounces back a little and settles
+    float t = (float)(s_ko_ms - KO_FALL);
+    float decay = my_exp2(-t / 130.0f);
+    int32_t ph = (int32_t)(t * (TRIG_MAX_ANGLE / 2) / 260.0f);
+    int32_t sn = sin_lookup(ph);
+    a = 1.0f - 0.12f * decay * (sn < 0 ? -sn : sn) / TRIG_MAX_RATIO;
+  }
+  // When the panels fold in nothing props it up any more: it tips further
+  // onto its body, picking up speed like the first fall, with a small bounce.
+  float sag;
+  if (s_ko_ms < KO_SAGGED) {
+    float x = ramp(s_ko_ms, KO_SAG, KO_SAGGED);
+    sag = x * x;
+  } else {
+    float t = (float)(s_ko_ms - KO_SAGGED);
+    int32_t sn = sin_lookup((int32_t)(t * (TRIG_MAX_ANGLE / 2) / 200.0f));
+    sag = 1.0f - 0.25f * my_exp2(-t / 110.0f) * (sn < 0 ? -sn : sn) / TRIG_MAX_RATIO;
+  }
+  return (int32_t)(s_ko_dir * ((float)KO_ANGLE * a + (float)KO_SETTLE * sag));
+}
+
+// how high the claw has the turret (model units): lifting the old one off
+// the floor and away, then lowering the new one into place
+static float ko_carry(void) {
+  if (!s_ko) return 0;
+  if (s_ko_ms < KO_SWAP) {
+    float x = ramp(s_ko_ms, KO_LIFT, KO_SWAP);
+    return KO_HIGH * x * x;                     // slowly at first
+  }
+  float x = 1.0f - ramp(s_ko_ms, KO_SWAP, KO_PLACE);
+  return KO_HIGH * x * x * (1.6f - 0.6f * x);   // eases into place
+}
+
+// 0..16: the eye and laser powered (16) or dark (0)
+static int ko_power(void) {
+  if (!s_ko) return 16;
+  float p = s_ko_ms < KO_SWAP ? 1.0f - ramp(s_ko_ms, KO_FIRE_END, KO_DOWN_END)
+                              : ramp(s_ko_ms, KO_POWER, KO_POWER + 400);
+  return (int)(p * 16 + 0.5f);
+}
+
+static float s_ko_top;  // the fallen turret's highest point (model units), for the claw
+
+static bool ko_firing(void) {
+  return s_ko && s_ko_ms > 150 && s_ko_ms < KO_FIRE_END;
+}
+
+static void setup_roll(void) {
+  int32_t a = tip_angle() + ko_angle();
+  s_roll_ang = a;
+  s_roll_s = sin_lookup(a);
+  s_roll_c = cos_lookup(a);
+  // it rocks (or falls) on the foot it leans towards
+  float foot = TIP_FOOT * (a > 0 ? -1 : 1);
+  float px = s_hdr.center[0] + foot;
+  s_roll_px = (int32_t)(px / s_hdr.vscale);
+
+  // keep it on the floor: lift it by however far its rotated bounding box
+  // would sink below y = 0 (it comes to rest on a panel, or its body)
+  // (the open panels stick out past the body; folded they're inside it)
+  float sn = (float)s_roll_s / TRIG_MAX_RATIO, cs = (float)s_roll_c / TRIG_MAX_RATIO;
+  float hw = BODY_HW + (s_hdr.width / 2 - BODY_HW) * s_wings, lo = 0, hi = 0;
+  for (int i = 0; i < 4; i++) {
+    float dx = s_hdr.center[0] + ((i & 1) ? hw : -hw) - px;
+    float y = (i & 2) ? s_hdr.height : 0;
+    float ry = dx * sn + y * cs;
+    if (ry < lo) lo = ry;
+    if (ry > hi) hi = ry;
+  }
+  float lift = -lo + ko_carry();
+  s_ko_top = hi - lo;
+  s_lift_q = (int32_t)(lift / s_hdr.vscale);
+  s_roll_on = a != 0 || s_lift_q != 0;
+
+}
+
+// where the fallen turret's middle will come to rest, for the camera to frame
+// it from the start (so the camera settles while it falls, then stays put)
+static void ko_rest_point(void) {
+  int32_t a = s_ko_dir * KO_ANGLE;
+  float sn = (float)sin_lookup(a) / TRIG_MAX_RATIO, cs = (float)cos_lookup(a) / TRIG_MAX_RATIO;
+  float px = s_hdr.center[0] + TIP_FOOT * (a > 0 ? -1 : 1);
+  float mx = px + (s_hdr.center[0] - px) * cs - s_hdr.center[1] * sn;
+  s_ko_cx = (int32_t)(mx / s_hdr.vscale);
+}
+
+// lean a model-space point (the feet are at y = 0), then lift it
 static inline void roll_q(int32_t *x, int32_t *y) {
   if (!s_roll_on) return;
   int32_t dx = *x - s_roll_px;
   int32_t nx = (int32_t)(((int64_t)dx * s_roll_c - (int64_t)*y * s_roll_s) >> 16);
-  *y = (int32_t)(((int64_t)dx * s_roll_s + (int64_t)*y * s_roll_c) >> 16);
+  *y = (int32_t)(((int64_t)dx * s_roll_s + (int64_t)*y * s_roll_c) >> 16) + s_lift_q;
   *x = s_roll_px + nx;
+}
+
+// lean a direction (no pivot, no lift)
+static inline void roll_dir(int32_t *x, int32_t *y) {
+  if (!s_roll_on) return;
+  int32_t nx = (int32_t)(((int64_t)*x * s_roll_c - (int64_t)*y * s_roll_s) >> 16);
+  *y = (int32_t)(((int64_t)*x * s_roll_s + (int64_t)*y * s_roll_c) >> 16);
+  *x = nx;
 }
 
 static void setup_camera(GRect bounds, float zoom) {
@@ -423,24 +634,24 @@ static void setup_camera(GRect bounds, float zoom) {
   float w = bounds.size.w, ht = bounds.size.h;
   float iv = 1.0f / h->vscale;
 
-  int32_t yaw = (int32_t)(sin_lookup((int32_t)(s_sway_ms * (TRIG_MAX_ANGLE / 7000)))
+  int32_t yaw = (int32_t)(s_sway_dir * sin_lookup((int32_t)(s_sway_ms * (TRIG_MAX_ANGLE / 7000)))
                           * (int64_t)YAW_MAX / TRIG_MAX_RATIO * zoom);
   s_cam.ys = sin_lookup(yaw);
   s_cam.yc = cos_lookup(yaw);
   int32_t pitch = (int32_t)(PITCH_MAX * zoom);
   s_cam.ps = sin_lookup(pitch);
   s_cam.pc = cos_lookup(pitch);
-  s_cam.ccx = (int32_t)(h->center[0] * iv);
-  s_cam.ccz = (int32_t)(h->center[2] * iv);
+  s_cam.ccx = (int32_t)(s_frame_center[0] * iv);
+  s_cam.ccz = (int32_t)(s_frame_center[2] * iv);
 
   float s0 = EYE_PX / h->eye_r;
 #if defined(PBL_ROUND)
   // fit the bounding box's corners inside the circle
-  float hh = h->height / 2, hw = h->width / 2;
+  float hh = s_frame_height / 2, hw = s_frame_width / 2;
   float s1 = (w < ht ? w : ht) * 0.45f / my_sqrt(hh * hh + hw * hw);
 #else
-  float s1a = ht * 0.80f / h->height;
-  float s1b = w * 0.90f / h->width;
+  float s1a = ht * 0.80f / s_frame_height;
+  float s1b = w * 0.90f / s_frame_width;
   float s1 = s1a < s1b ? s1a : s1b;
 #endif
   // Zoom exponentially (constant perceived speed), and move the target and
@@ -457,11 +668,21 @@ static void setup_camera(GRect bounds, float zoom) {
   int32_t eye_tx = s_cam.ex, eye_ty = s_cam.ey;
 
   // aim a little below the middle: the downward tilt pushes the feet low
-  int32_t cx = s_cam.ccx, cy = (int32_t)((h->center[1] - 0.07f * h->height) * iv), cz = s_cam.ccz;
+  int32_t cx = s_cam.ccx, cy = (int32_t)((s_frame_center[1] - 0.07f * s_frame_height) * iv);
+  int32_t cz = s_cam.ccz;
   s_cam.tx = eye_tx + (int32_t)((cx - eye_tx) * pan);
   s_cam.ty = eye_ty + (int32_t)((cy - eye_ty) * pan);
   s_cam.tz = s_cam.ez + (int32_t)((cz - s_cam.ez) * pan);
-  s_cam.dist = (int32_t)(h->height * 2.5f * iv);
+  s_cam.dist = (int32_t)(s_frame_height * 2.5f * iv);
+
+  // knocked over: pull back, follow it sideways and look a little lower, so
+  // the turret lying on its side and the claw above it stay in view
+  if (s_ko_view > 0) {
+    float v = smooth(s_ko_view / 1000.0f);
+    s_cam.scale *= 1.0f - 0.2f * v;
+    s_cam.tx += (int32_t)((s_ko_cx - s_cam.tx) * 0.45f * v);
+    s_cam.ty -= (int32_t)(0.12f * s_frame_height * iv * v);
+  }
 
   // the eye leans with the turret (the camera target doesn't)
   s_cam.ex = (int32_t)(h->eye[0] * iv);
@@ -479,7 +700,7 @@ static void setup_camera(GRect bounds, float zoom) {
 // point on the eye disc: clock angle (TRIG_MAX_ANGLE units, 0 = 12 o'clock)
 // and radius as a fraction (x1000) of the eye radius
 static void eye_pt(int32_t angle, int32_t r1000, ScreenVert *out) {
-  angle -= tip_angle();
+  angle -= s_roll_ang;
   int32_t rr = s_cam.eye_r * r1000 / 1000;
   int32_t ox = (int32_t)(((int64_t)rr * sin_lookup(angle)) >> 16);
   int32_t oy = (int32_t)(((int64_t)rr * cos_lookup(angle)) >> 16);
@@ -525,8 +746,28 @@ static void setup_mask(int fb_h) {
   s_ma = right.x - c.x;
   s_mb = c.y - top.y;
   if (s_ma < 0) s_ma = -s_ma;
+  if (s_roll_ang) {
+    // leaning or lying: the eye's axes turn with it, so use a circle that
+    // fits inside it
+    int32_t tx = top.x - c.x, ty = top.y - c.y, rx = right.x - c.x, ry = right.y - c.y;
+    if (tx < -40000 || tx > 40000 || ty < -40000 || ty > 40000
+        || rx < -40000 || rx > 40000 || ry < -40000 || ry > 40000) {
+      s_ma = s_mb = 0;
+    } else {
+      int32_t rt = isqrt((uint32_t)(tx * tx) + (uint32_t)(ty * ty));
+      int32_t rr = isqrt((uint32_t)(rx * rx) + (uint32_t)(ry * ry));
+      s_ma = s_mb = rt < rr ? rt : rr;
+    }
+  }
   s_mask_on = s_mb >= 6 * 256 && s_ma >= 6 * 256 && s_mb < 40000 && s_ma < 40000;
-  if (!s_mask_on) return;
+  if (!s_mask_on) {
+    // nothing is masked (the rows keep no old mask from an earlier frame)
+    for (int y = 0; y < 260; y++) {
+      s_mask_l[y] = 1;
+      s_mask_r[y] = 0;
+    }
+    return;
+  }
   for (int y = 0; y < fb_h && y < 260; y++) {
     int32_t dy = (y << 8) + 128 - s_my;
     s_mask_l[y] = 1;
@@ -696,10 +937,10 @@ static void raster_tri(GBitmap *fb, int fb_h, const ScreenVert *a,
   }
 }
 
-// LSD radix sort, ascending
+// LSD radix sort of 24-bit keys, ascending; the result ends up in tmp
 static void sort_items(uint32_t *a, uint32_t *tmp, int n) {
   uint16_t count[256];
-  for (int shift = 0; shift < 32; shift += 8) {
+  for (int shift = 0; shift < 24; shift += 8) {
     memset(count, 0, sizeof(count));
     for (int i = 0; i < n; i++) count[(a[i] >> shift) & 0xFF]++;
     uint16_t sum = 0;
@@ -707,17 +948,107 @@ static void sort_items(uint32_t *a, uint32_t *tmp, int n) {
     for (int i = 0; i < n; i++) tmp[count[(a[i] >> shift) & 0xFF]++] = a[i];
     uint32_t *sw = a; a = tmp; tmp = sw;
   }
-  // four passes: the result is back in the caller's array
+  // three passes: the result is in the caller's tmp
 }
 
 // current scan direction: yaw (+ = turret's left, screen right) and pitch
 // (+ = down), TRIG_MAX_ANGLE units
+// ---------------------------------------------------------------------------
+// Spotted: with the "chance of turret seeing you" setting, a flick may end
+// with it finding you mid-scan. It swings its panels and laser onto the
+// camera (you) and opens fire; red creeps in from the edges of the screen.
+// Flick before it closes in and you knock the turret over (and live);
+// otherwise the screen goes red, fades, and it goes back to sleep.
+
+#define SPOT_FIRE 550       // swung onto you (still homing in): opens fire
+#define SPOT_KILL (s_defective ? 2600 : 3900)  // firing until here: you're done for
+                                               // (defective: it gives up, or blows)
+#define SPOT_LASER_OFF (SPOT_KILL + 1000)       // laser back to straight ahead, then off
+#define SPOT_END (SPOT_KILL + 1600)             // the red fades out, it goes back to sleep
+#define DEF_BOOM (SPOT_KILL + (s_spot_fire ? 2300 : 1000))  // defective, exploding: kaboom
+#define FIRE_PANIC 700                          // on fire: it notices after this long
+#define BOOM_LEN 2400                           // ... the smoke clears, the claw comes
+#define DRY_EVERY 560                           // the dry-fire clicks are this long
+
+static bool s_spot_boom;   // spotted by a defective turret that will explode
+static bool s_spot_fire;   // ... catching fire first
+
+// blown up: no turret to draw
+static bool turret_gone(void) {
+  return s_spot_boom && s_spot_ms >= DEF_BOOM + 60;
+}
+
+static bool spot_firing(void) {
+  return s_spot_ms >= SPOT_FIRE && s_spot_ms < SPOT_KILL;
+}
+
+// How far its aim still is from you, as a fraction of where it started: it
+// whips round, overshoots, and homes in with quick servo-like corrections
+// (a damped spring, held in steps). 1 at the start, settling to 0.
+static float spot_aim(int32_t t) {
+  if (t > 120) t -= t % 60;  // the corrections come in little jumps
+  float decay = my_exp2(-t / (170.0f * 0.6931472f));
+  return decay * cos_lookup((int32_t)((int64_t)t * TRIG_MAX_ANGLE / 300)) / TRIG_MAX_RATIO;
+}
+
+// how much of the laser's usual downward tilt applies (it aims straight at
+// you, and afterwards goes back to looking straight ahead)
+static float spot_tilt(void) {
+  if (s_spot_ms < 0) return 1.0f;
+  if (s_spot_ms < SPOT_KILL) return 1.0f - ramp(s_spot_ms, 0, 150);
+  return smooth(ramp(s_spot_ms, SPOT_KILL + 150, SPOT_KILL + 550));
+}
+
+// the side panels jolting up and down a little while it shoots
+static int32_t panel_recoil(void) {
+  int32_t t;
+  if (spot_firing()) t = s_spot_ms;
+  else if (ko_firing()) t = s_ko_ms;
+  else return 0;
+  return sin_lookup((int32_t)((int64_t)t * TRIG_MAX_ANGLE / 140))
+         * (TRIG_MAX_ANGLE * 4 / 360) / TRIG_MAX_RATIO;
+}
+
+// the yaw and pitch (scan rotation, see rot_make) that aim from the eye
+// straight at the camera
+static void lock_angles(int32_t *yaw, int32_t *pitch) {
+  float iv = 1.0f / s_hdr.vscale;
+  // the camera, in the swayed frame, then turned back into model space
+  int32_t cx = s_cam.tx, cy = s_cam.ty + (int32_t)(((int64_t)s_cam.dist * s_cam.ps) >> 16);
+  int32_t cz = s_cam.tz + (int32_t)(((int64_t)s_cam.dist * s_cam.pc) >> 16);
+  int32_t dx = cx - s_cam.ccx, dz = cz - s_cam.ccz;
+  int32_t mx = s_cam.ccx + (int32_t)(((int64_t)dx * s_cam.yc - (int64_t)dz * s_cam.ys) >> 16);
+  int32_t mz = s_cam.ccz + (int32_t)(((int64_t)dz * s_cam.yc + (int64_t)dx * s_cam.ys) >> 16);
+  int32_t vx = (mx - (int32_t)(s_hdr.eye[0] * iv)) >> 4;
+  int32_t vy = (cy - (int32_t)(s_hdr.eye[1] * iv)) >> 4;
+  int32_t vz = (mz - (int32_t)(s_hdr.eye[2] * iv)) >> 4;
+  int32_t a = atan2_lookup((int16_t)vx, (int16_t)vz);
+  *yaw = a > TRIG_MAX_ANGLE / 2 ? a - TRIG_MAX_ANGLE : a;
+  int32_t hz = isqrt((uint32_t)(vx * vx + vz * vz));
+  int32_t p = atan2_lookup((int16_t)-vy, (int16_t)hz);
+  *pitch = p > TRIG_MAX_ANGLE / 2 ? p - TRIG_MAX_ANGLE : p;
+}
+
 static void scan_angles(int32_t *yaw, int32_t *pitch) {
   float amp = ease(s_scan_p);
   *yaw = (int32_t)(sin_lookup((int32_t)((uint64_t)s_scan_ms * TRIG_MAX_ANGLE / SCAN_YAW_MS))
                    * (int64_t)SCAN_YAW / TRIG_MAX_RATIO * amp);
   *pitch = (int32_t)(sin_lookup((int32_t)((uint64_t)s_scan_ms * TRIG_MAX_ANGLE / SCAN_PITCH_MS))
                      * (int64_t)SCAN_PITCH / TRIG_MAX_RATIO * amp);
+  if (s_spot_ms >= 0) {
+    int32_t ly, lp;
+    lock_angles(&ly, &lp);
+    if (s_spot_ms < SPOT_KILL) {
+      float f = spot_aim(s_spot_ms);
+      *yaw = ly + (int32_t)((s_spot_y0 - ly) * f);
+      *pitch = lp + (int32_t)((s_spot_p0 - lp) * f);
+    } else {
+      // got you: back to looking straight ahead
+      float x = smooth(ramp(s_spot_ms, SPOT_KILL + 150, SPOT_KILL + 550));
+      *yaw = (int32_t)(ly * (1 - x));
+      *pitch = (int32_t)(lp * (1 - x));
+    }
+  }
 }
 
 // rotation by pitch (about x) then yaw (about y), sin/cos in TRIG_MAX_RATIO
@@ -754,7 +1085,7 @@ static void render_model(GBitmap *fb, GRect bounds, float wings) {
   if (scan) {
     int32_t yaw, pitch;
     scan_angles(&yaw, &pitch);
-    rot_make(&rot, yaw, pitch);
+    rot_make(&rot, yaw, pitch + panel_recoil());
   }
 
   for (int i = 0; i < h->nverts; i++) {
@@ -776,6 +1107,7 @@ static void render_model(GBitmap *fb, GRect bounds, float wings) {
 
   int32_t W = bounds.size.w, H = bounds.size.h;
   int n = 0;
+  uint32_t dmin = UINT32_MAX, dmax = 0;
   bool cull = h->flags & FLAG_CULL;
   for (int i = 0; i < h->ntris; i++) {
     const ModelTri *t = &s_tris[i];
@@ -798,16 +1130,24 @@ static void render_model(GBitmap *fb, GRect bounds, float wings) {
     if (maxx < 0 || maxy < 0 || minx > (W << 8) || miny > (H << 8)) continue;
     // hidden behind the eye?
     if (s_mask_on && in_mask(a) && in_mask(b) && in_mask(c)) continue;
-    uint32_t depth = (uint32_t)(a->z + b->z + c->z) >> 2;
-    s_items[n++] = (depth << IDX_BITS) | i;
+    uint32_t depth = (uint32_t)(a->z + b->z + c->z);
+    if (depth < dmin) dmin = depth;
+    if (depth > dmax) dmax = depth;
+    s_items_tmp[n] = depth;
+    s_items[n++] = i;
   }
+  // depth relative to the nearest, scaled into 13 bits: with the 11-bit
+  // index that's a 24-bit key, three radix passes
+  int dshift = 0;
+  while (n && ((dmax - dmin) >> dshift) >= (1u << (24 - IDX_BITS))) dshift++;
+  for (int k = 0; k < n; k++) s_items[k] |= ((s_items_tmp[k] - dmin) >> dshift) << IDX_BITS;
   audio_pump();
   sort_items(s_items, s_items_tmp, n);
 
   int fb_h = gbitmap_get_bounds(fb).size.h;
   int32_t ys = s_cam.ys, yc = s_cam.yc;
-  for (int k = n - 1; k >= 0; k--) {  // far first
-    int idx = s_items[k] & ((1 << IDX_BITS) - 1);
+  for (int k = n - 1; k >= 0; k--) {  // far first (the largest depth)
+    int idx = s_items_tmp[k] & ((1 << IDX_BITS) - 1);
     const ModelTri *t = &s_tris[idx];
     if ((k & 255) == 0) audio_pump();
     const int8_t *nm = &s_normals[idx * 3];
@@ -876,6 +1216,13 @@ static void solid(GColor c, uint8_t pat[16]) {
   memset(pat, c.argb, 16);
 }
 
+// powered down: only `power`/16 of the pattern's pixels stay lit
+static void power_mask(uint8_t pat[16], int power) {
+  for (int t = 0; t < 16; t++) {
+    if (BAYER[t] >= power) pat[t] = GColorBlackARGB8;
+  }
+}
+
 static void render_eye(GBitmap *fb) {
   int fb_h = gbitmap_get_bounds(fb).size.h;
   uint8_t pat[16];
@@ -884,11 +1231,13 @@ static void render_eye(GBitmap *fb) {
   bool small = r_px < 24.0f;
   s_ring_segs = small ? 16 : RING_SEGS;
 
+  int power = ko_power();  // knocked over: the eye goes dark, and back on
   if (r_px < 6.0f) {
     // far away: just the glowing lens
     solid(GColorBlack, pat);
     fill_ring(fb, fb_h, 0, 1000, pat);
     solid(GColorRed, pat);
+    power_mask(pat, power);
     fill_ring(fb, fb_h, 340, 880, pat);
     return;
   }
@@ -916,6 +1265,10 @@ static void render_eye(GBitmap *fb) {
   solid(GColorRed, hot[1]);
   solid(GColorRed, hot[2]);
   mix_pattern(GColorDarkCandyAppleRed, GColorRed, 12, hot[3]);
+  for (int i = 0; i < 4; i++) {
+    power_mask(dim[i], power);
+    power_mask(hot[i], power);
+  }
   static const int16_t RINGS[5] = { 340, 480, 620, 760, 900 };
   int step = small ? 2 : 1;  // small: two bands (inner/outer half) per wedge
   for (int i = 0; i < WEDGES; i++) {
@@ -937,7 +1290,7 @@ static void render_eye(GBitmap *fb) {
 #define WALL_Z (-1.25f)
 #define WALL_PANEL 0.9f
 #define FLOOR_TILE 0.45f
-#define FLOOR_NEAR 1.6f
+#define FLOOR_NEAR 1.9f   // the 7 rows of floor tiles, all full size
 
 static void room_quad(GBitmap *fb, int fb_h, int32_t q[4][3], const uint8_t pat[16]) {
   ScreenVert sv[4];
@@ -1146,6 +1499,119 @@ static void render_room(GBitmap *fb) {
 }
 
 // ---------------------------------------------------------------------------
+// Close-up picture: the full-detail turret around the eye, rendered offline
+// from the original model through the close-up camera
+// (tools/render_closeup.py; resources/closeup~<platform>.bin), so the eye view
+// shows no low-poly facets. It is streamed from flash a row at a time. As
+// the camera zooms out it shrinks with the view and dissolves, with the
+// same 4x4 dither pattern as the shading, into the live low-poly model.
+
+#define CLOSEUP_GONE 0.7f   // fully dissolved once the view has shrunk to this
+
+// resource: u16 width, u16 height, 16 palette colours (0 = nothing there),
+// then 4 bits per pixel, the left pixel of each pair in the low nibble
+#define CU_HEAD 20
+
+static ResHandle s_cu_res;
+static uint16_t s_cu_w, s_cu_h, s_cu_stride;
+static uint8_t s_cu_pal[16];
+static bool s_cu_ok;
+
+static void load_closeup(void) {
+  s_cu_res = resource_get_handle(CLOSEUP_RES);
+  uint8_t head[CU_HEAD];
+  s_cu_ok = resource_load_byte_range(s_cu_res, 0, head, CU_HEAD) == CU_HEAD;
+  s_cu_w = head[0] | head[1] << 8;
+  s_cu_h = head[2] | head[3] << 8;
+  s_cu_stride = (s_cu_w + 1) / 2;
+  memcpy(s_cu_pal, head + 4, 16);
+  s_cu_ok = s_cu_ok && s_cu_w <= MAX_ROWS
+            && resource_size(s_cu_res) == CU_HEAD + (size_t)s_cu_stride * s_cu_h;
+}
+
+// Switch between the regular and the defective turret: its own mesh, header
+// and close-up picture. A new turret is picked at start-up, whenever the
+// claw brings one, and when the chance setting changes.
+static void set_type(bool defective) {
+  release_model();
+  if (!s_frame_height) {
+    s_defective = false;
+    load_header();
+    s_frame_height = s_hdr.height;
+    s_frame_width = s_hdr.width;
+    memcpy(s_frame_center, s_hdr.center, sizeof(s_frame_center));
+  }
+  s_defective = defective;
+  load_header();
+  load_closeup();
+}
+
+static void roll_type(void) {
+#if defined(DEBUG_DEFECTIVE) && defined(HAS_DEFECTIVE)
+  set_type(DEBUG_DEFECTIVE);
+#elif defined(HAS_DEFECTIVE)
+  set_type((rand() % 100) < s_cfg.defect_chance);
+#else
+  set_type(false);
+#endif
+}
+
+// how much of the picture shows: 0 (none) .. 16 (all of it)
+static int closeup_level(void) {
+  if (!s_cu_ok) return 0;
+  float r = s_cam.scale * s_hdr.eye_r / EYE_PX;  // 1 close up, shrinking as it zooms out
+  if (r >= 0.999f) return 16;
+  float a = (r - CLOSEUP_GONE) / (1.0f - CLOSEUP_GONE);
+  return a <= 0 ? 0 : (int)(a * 16 + 0.5f);
+}
+
+#define CU_CHUNK 16  // picture rows read from flash at a time
+
+static void render_closeup(int fb_h, int level) {
+  static uint8_t rows[1][CU_CHUNK * ((MAX_ROWS + 1) / 2)];
+  static int32_t first = -1, count;  // which picture rows `rows` holds
+  // the picture is centred on the eye at the close-up scale; follow the eye
+  ScreenVert c;
+  eye_pt(0, 0, &c);
+  float r = s_cam.scale * s_hdr.eye_r / EYE_PX;
+  int32_t inv = (int32_t)(65536.0f / r);  // picture pixels per screen pixel, 16.16
+  for (int y = 0; y < fb_h && y < MAX_ROWS; y++) {
+    // picture row under this screen row's centre
+    int32_t v = (s_cu_h << 15) + (int32_t)(((int64_t)((y << 8) + 128 - c.y) * inv) >> 8);
+    int32_t vy = v >> 16;
+    if (v < 0 || vy >= s_cu_h) continue;
+    if (first < 0 || vy < first || vy >= first + count) {
+      // reading flash is slow per call: fetch a run of rows at once
+      first = vy;
+      count = s_cu_h - vy < CU_CHUNK ? s_cu_h - vy : CU_CHUNK;
+      resource_load_byte_range(s_cu_res, CU_HEAD + (uint32_t)vy * s_cu_stride,
+                               rows[0], (uint32_t)count * s_cu_stride);
+    }
+    const uint8_t *row = rows[0] + (vy - first) * s_cu_stride;
+    uint8_t *dst = s_row_data[y];
+    const uint8_t *bayer = &BAYER[(y & 3) * 4];
+    int32_t x0 = s_row_min[y], x1 = s_row_max[y];
+    // the eye gets drawn over the middle: skip it
+    int32_t ml = s_mask_l[y], mr = s_mask_r[y];
+    int32_t u = (s_cu_w << 15) + (int32_t)(((int64_t)((x0 << 8) + 128 - c.x) * inv) >> 8);
+    for (int32_t x = x0; x <= x1; x++, u += inv) {
+      if (x == ml && ml <= mr) {
+        u += inv * (mr + 1 - x);
+        x = mr + 1;
+        if (x > x1) break;
+      }
+      if (bayer[x & 3] >= level) continue;
+      int32_t ux = u >> 16;
+      if (u < 0 || ux >= s_cu_w) continue;
+      uint8_t col = s_cu_pal[(row[ux >> 1] >> ((ux & 1) * 4)) & 15];
+      if (col) dst[x] = col;
+    }
+    if ((y & 31) == 0) audio_pump();
+  }
+  first = -1;  // the picture may have moved by the next frame's rows; reread
+}
+
+// ---------------------------------------------------------------------------
 // Laser sight: a red beam from the eye along the scan direction, ending in a
 // dot where it meets the floor.
 
@@ -1170,7 +1636,7 @@ static void render_laser(GBitmap *fb) {
   int32_t yaw, pitch;
   scan_angles(&yaw, &pitch);
   Rot r;
-  rot_make(&r, yaw, pitch + LASER_TILT);
+  rot_make(&r, yaw, pitch + (int32_t)(LASER_TILT * spot_tilt()));
   int32_t dx = 0, dy = 0, dz = 1 << 12;  // straight ahead, 1.0 in .12
   rot_apply(&r, &dx, &dy, &dz);
   if (s_roll_on) {
@@ -1209,6 +1675,373 @@ static void render_laser(GBitmap *fb) {
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Knocked over: muzzle flashes and tracers from the guns in the side
+// panels, and the claw that takes the turret away and brings a new one.
+
+// a point on a side panel (offset from its centre, model units), moved with
+// the panel like its vertices (render_model), then projected
+static void panel_point(int g, float dx, float dy, float dz, const Rot *rot, ScreenVert *out) {
+  float iv = 1.0f / s_hdr.vscale;
+  int32_t x = (int32_t)(dx * iv), y = (int32_t)(dy * iv), z = (int32_t)(dz * iv);
+  rot_apply(rot, &x, &y, &z);
+  float open = s_wings - 1.0f;
+  x += s_pivot[g][0] + (int32_t)(s_hdr.group_off[g][0] * open * iv);
+  y += s_pivot[g][1] + (int32_t)(s_hdr.group_off[g][1] * open * iv);
+  z += s_pivot[g][2] + (int32_t)(s_hdr.group_off[g][2] * open * iv);
+  roll_q(&x, &y);
+  yaw_q(&x, &z);
+  project(x, y, z, out);
+}
+
+static void render_guns(GBitmap *fb, int fb_h) {
+  int32_t yaw, pitch;
+  scan_angles(&yaw, &pitch);
+  Rot rot;
+  rot_make(&rot, yaw, pitch + panel_recoil());
+  uint8_t flash[16], core[16], tracer[16];
+  solid(GColorOrange, flash);
+  solid(GColorYellow, core);
+  solid(GColorPastelYellow, tracer);
+  int32_t r = (int32_t)(0.07f * s_cam.scale * 256);  // flash size, 24.8
+  int frame = (s_ko ? s_ko_ms : s_spot_ms) / 60;
+  for (int i = 0; i < 4; i++) {
+    if ((frame + i) & 1) continue;  // each gun flashes every other frame
+    int g = 1 + (i >> 1);
+    float dy = (i & 1) ? 0.09f : -0.09f;
+    ScreenVert m, t0, t1;
+    panel_point(g, 0.0f, dy, 0.14f, &rot, &m);
+    // a tracer flying off where the gun points, scattered a little
+    float sx = (rand() % 100 - 50) * 0.004f, sy = (rand() % 100 - 50) * 0.004f;
+    panel_point(g, sx * 0.6f, dy + sy * 0.6f, 0.75f, &rot, &t0);
+    panel_point(g, sx * 2.4f, dy + sy * 2.4f, 2.6f, &rot, &t1);
+    beam(fb, fb_h, &t0, &t1, 256, tracer);
+    ScreenVert a = { m.x - r, m.y, 0 }, b = { m.x + r, m.y, 0 };
+    ScreenVert c = { m.x, m.y - r, 0 }, d = { m.x, m.y + r, 0 };
+    beam(fb, fb_h, &a, &b, r * 2 / 3, flash);
+    beam(fb, fb_h, &c, &d, r * 2 / 3, flash);
+    ScreenVert e = { m.x - r / 2, m.y, 0 }, f = { m.x + r / 2, m.y, 0 };
+    beam(fb, fb_h, &e, &f, r / 2, core);
+  }
+}
+
+// the claw's hand: where it is (model units) and how open (0..1)
+typedef struct { float x, y, z, open; bool on; } Claw;
+
+static Claw ko_claw(void) {
+  Claw c = { 0 };
+  int32_t t = s_ko_ms;
+  if (!s_ko || t < KO_GRAB || t >= KO_END) return c;
+  c.on = true;
+  // over the fallen turret's middle, then the new one's (standing upright)
+  c.x = t < KO_SWAP ? s_ko_cx * s_hdr.vscale : s_hdr.center[0];
+  c.z = s_hdr.center[2];
+  // grip height: just above the turret, lying (old) or standing (new)
+  float lie_top = s_ko_top - 0.1f, stand_top = s_hdr.height - 0.12f;
+  float top = (t < KO_SWAP ? lie_top : stand_top) + ko_carry();
+  if (t < KO_GRIP) {
+    float x = smooth(ramp(t, KO_GRAB, KO_GRIP));
+    c.y = top + (KO_HIGH + 1.0f) * (1 - x);     // coming down
+    c.open = 1;
+  } else if (t < KO_LIFT) {
+    c.y = top;
+    c.open = 1 - ramp(t, KO_GRIP, KO_LIFT);     // closing on it
+  } else if (t < KO_PLACE) {
+    c.y = top;                                  // carrying
+    c.open = 0;
+  } else if (t < KO_UP) {
+    c.y = top;
+    c.open = ramp(t, KO_PLACE, KO_PLACE + 250); // letting go
+  } else {
+    float x = ramp(t, KO_UP, KO_END);
+    c.y = top + (KO_HIGH + 1.0f) * x * x;       // going back up
+    c.open = 1;
+  }
+  return c;
+}
+
+static void claw_seg(GBitmap *fb, int fb_h, float x0, float y0, float z0,
+                     float x1, float y1, float z1, float width, const uint8_t pat[16]) {
+  float iv = 1.0f / s_hdr.vscale;
+  int32_t ax = (int32_t)(x0 * iv), az = (int32_t)(z0 * iv);
+  int32_t bx = (int32_t)(x1 * iv), bz = (int32_t)(z1 * iv);
+  yaw_q(&ax, &az);
+  yaw_q(&bx, &bz);
+  ScreenVert a, b;
+  project(ax, (int32_t)(y0 * iv), az, &a);
+  project(bx, (int32_t)(y1 * iv), bz, &b);
+  beam(fb, fb_h, &a, &b, (int32_t)(width * s_cam.scale * 256), pat);
+}
+
+// front = false: the prong behind the turret; true: everything else
+static void render_claw(GBitmap *fb, int fb_h, bool front) {
+  Claw c = ko_claw();
+  if (!c.on) return;
+  uint8_t arm[16], hub[16], prong[16], dark[16];
+  mix_pattern(GColorDarkGray, GColorLightGray, 5, arm);
+  solid(GColorLightGray, hub);
+  mix_pattern(GColorDarkGray, GColorLightGray, 3, prong);
+  solid(GColorBlack, dark);
+  static const int8_t DIRS[4][2] = { { 0, -1 }, { -1, 0 }, { 1, 0 }, { 0, 1 } };  // x, z
+  for (int i = 0; i < 4; i++) {
+    bool is_front = i != 0;
+    if (is_front != front) continue;
+    float dx = DIRS[i][0], dz = DIRS[i][1];
+    float o = c.open;
+    // knuckle on the hub, elbow out to the side, tip curling in
+    float kx = c.x + dx * 0.11f, kz = c.z + dz * 0.11f, ky = c.y - 0.02f;
+    float ex = c.x + dx * (0.2f + 0.1f * o), ez = c.z + dz * (0.2f + 0.1f * o), ey = c.y - 0.17f;
+    float tx = c.x + dx * (0.1f + 0.16f * o), tz = c.z + dz * (0.1f + 0.16f * o), ty = c.y - 0.36f;
+    claw_seg(fb, fb_h, kx, ky, kz, ex, ey, ez, 0.045f, prong);
+    claw_seg(fb, fb_h, ex, ey, ez, tx, ty, tz, 0.038f, prong);
+  }
+  if (!front) return;
+  claw_seg(fb, fb_h, c.x, c.y + 0.05f, c.z, c.x, c.y + KO_HIGH + 2.0f, c.z, 0.07f, arm);
+  claw_seg(fb, fb_h, c.x, c.y + 0.1f, c.z, c.x, c.y + 0.16f, c.z, 0.11f, dark);
+  claw_seg(fb, fb_h, c.x - 0.15f, c.y, c.z, c.x + 0.15f, c.y, c.z, 0.1f, hub);
+}
+
+// ---------------------------------------------------------------------------
+// A defective turret blowing up: a flash, a fireball, smoke, flying bits and
+// a scorch mark where it stood.
+
+// a filled (screen-space) ellipse, centre and radius in 24.8, ry = r * squash
+static void fill_disc(int fb_h, int32_t cx, int32_t cy, int32_t r, int32_t squash256,
+                      const uint8_t pat[16]) {
+  int32_t ry = (int32_t)((int64_t)r * squash256 >> 8);
+  if (r < 128 || ry < 128) return;
+  int32_t y0 = (cy - ry) >> 8, y1 = (cy + ry) >> 8;
+  if (y0 < 0) y0 = 0;
+  if (y1 >= fb_h) y1 = fb_h - 1;
+  for (int32_t y = y0; y <= y1 && y < MAX_ROWS; y++) {
+    int32_t dy = (y << 8) + 128 - cy;
+    if (dy <= -ry || dy >= ry) continue;
+    // half width at this row (in 24.8): r * sqrt(1 - (dy/ry)^2)
+    int32_t q = (int32_t)(((int64_t)dy << 12) / ry);  // dy/ry in .12
+    int32_t hw = (int32_t)((int64_t)r * isqrt((uint32_t)((1 << 24) - q * q)) >> 12);
+    int32_t x0 = ceil_px(cx - hw), x1 = ceil_px(cx + hw) - 1;
+    if (x0 < s_row_min[y]) x0 = s_row_min[y];
+    if (x1 > s_row_max[y]) x1 = s_row_max[y];
+    if (x0 <= x1) fill_span(s_row_data[y], x0, x1, &pat[(y & 3) * 4]);
+  }
+}
+
+// a model-space point (units), projected
+static void world_pt(float x, float y, float z, ScreenVert *out) {
+  float iv = 1.0f / s_hdr.vscale;
+  int32_t qx = (int32_t)(x * iv), qz = (int32_t)(z * iv);
+  yaw_q(&qx, &qz);
+  project(qx, (int32_t)(y * iv), qz, out);
+}
+
+static float my_sqrt_f(float x) {
+  float r = x > 1 ? x : 1;
+  for (int i = 0; i < 10; i++) r = 0.5f * (r + x / r);
+  return r;
+}
+
+// a cheap repeatable "random" number in [-1, 1] for piece i, property k
+static float hash1(int i, int k) {
+  uint32_t h = (uint32_t)(i * 374761393 + k * 668265263) ^ 0x5bd1e995;
+  h = (h ^ (h >> 13)) * 1274126177;
+  return ((h >> 8) & 0xFFFF) / 32767.5f - 1.0f;
+}
+
+// On fire: flames licking up the turret's body and panels. Each is a
+// tapering tongue (a stack of shrinking blobs: red outside, orange, then a
+// yellow core) that flickers in height and sways as it goes up.
+static void render_flames(int fb_h) {
+  if (!s_spot_fire || s_spot_ms < SPOT_KILL || turret_gone()) return;
+  int32_t t = s_spot_ms - SPOT_KILL;
+  float grow = ramp(t, 0, 600);  // catching
+  float px = s_cam.scale * 256;
+  uint8_t layers[3][16];
+  mix_pattern(GColorDarkCandyAppleRed, GColorRed, 10, layers[0]);
+  mix_pattern(GColorRed, GColorOrange, 11, layers[1]);
+  mix_pattern(GColorOrange, GColorYellow, 9, layers[2]);
+  float cx = s_hdr.center[0], cy = s_hdr.center[1], cz = s_hdr.center[2] + 0.12f;
+  int sources = 2 + (int)(5 * grow);  // more of it catches as it goes
+  int frame = t / 70;                 // flicker steps
+  for (int i = 0; i < sources; i++) {
+    float sx = cx + hash1(i, 21) * 0.22f, sy = cy - 0.15f + (hash1(i, 22) + 1) * 0.3f;
+    float sz = cz + hash1(i, 23) * 0.06f;
+    // this tongue's height, flickering from frame to frame
+    float tall = (0.24f + 0.08f * hash1(i, 24) + 0.07f * hash1(i, frame)) * grow;
+    float base = (0.06f + 0.02f * hash1(i, 25)) * (0.4f + 0.6f * grow);
+    float sway = 0.03f * hash1(i, frame + 100);
+    for (int layer = 0; layer < 3; layer++) {
+      float shrink = layer == 0 ? 1.0f : layer == 1 ? 0.72f : 0.45f;
+      float h = tall * (layer == 0 ? 1.0f : layer == 1 ? 0.8f : 0.55f);
+      for (int k = 0; k < 5; k++) {
+        float f = k / 4.0f;  // 0 base .. 1 tip
+        ScreenVert c;
+        world_pt(sx + sway * f * f, sy + h * f, sz, &c);
+        int32_t r = (int32_t)(base * shrink * (1 - 0.8f * f) * px);
+        fill_disc(fb_h, c.x, c.y, r, 330, layers[layer]);
+      }
+    }
+  }
+}
+
+static void render_boom(GBitmap *fb, int fb_h) {
+  if (!s_spot_boom || s_spot_ms < DEF_BOOM) return;
+  int32_t b = s_spot_ms - DEF_BOOM;
+  float cx = s_hdr.center[0], cy = s_hdr.center[1], cz = s_hdr.center[2];
+  float px = s_cam.scale * 256;  // 24.8 pixels per model unit, roughly
+  uint8_t pat[16];
+
+  // scorch mark on the floor where it stood
+  ScreenVert floor_pt;
+  world_pt(cx, 0, cz, &floor_pt);
+  mix_pattern(GColorDarkGray, GColorBlack, 9, pat);
+  fill_disc(fb_h, floor_pt.x, floor_pt.y, (int32_t)(0.36f * px * ramp(b, 0, 300)), 80, pat);
+
+  // smoke: puffs rising and spreading, thinning out
+  for (int i = 0; i < 6; i++) {
+    float age = ramp(b, 200 + i * 60, BOOM_LEN);
+    if (age <= 0 || age >= 1) continue;
+    ScreenVert c;
+    world_pt(cx + hash1(i, 1) * 0.35f, cy + 0.2f + age * (0.8f + 0.4f * hash1(i, 2)),
+             cz + hash1(i, 3) * 0.2f, &c);
+    int lvl = (int)(14 * (1 - age));
+    mix_pattern(GColorBlack, i & 1 ? GColorDarkGray : GColorLightGray, lvl, pat);
+    for (int t = 0; t < 16; t++) if (BAYER[t] >= lvl + 2) pat[t] = 0;  // see-through
+    int32_t r = (int32_t)((0.18f + 0.3f * age) * px);
+    // draw only the solid part of the pattern (0 = leave the pixel)
+    int32_t ry = r;
+    int32_t y0 = (c.y - ry) >> 8, y1 = (c.y + ry) >> 8;
+    for (int32_t y = y0 < 0 ? 0 : y0; y <= y1 && y < fb_h && y < MAX_ROWS; y++) {
+      int32_t dy = (y << 8) + 128 - c.y;
+      if (dy <= -ry || dy >= ry) continue;
+      int32_t hw = (int32_t)isqrt((uint32_t)((int64_t)ry * ry - (int64_t)dy * dy));
+      int32_t x0 = ceil_px(c.x - hw), x1 = ceil_px(c.x + hw) - 1;
+      if (x0 < s_row_min[y]) x0 = s_row_min[y];
+      if (x1 > s_row_max[y]) x1 = s_row_max[y];
+      const uint8_t *p = &pat[(y & 3) * 4];
+      for (int32_t x = x0; x <= x1; x++) if (p[x & 3]) s_row_data[y][x] = p[x & 3];
+    }
+  }
+
+  // flying pieces: thrown up and out, falling back, coming to rest
+  float tt = b / 1000.0f;
+  for (int i = 0; i < 10; i++) {
+    float vx = hash1(i, 4) * 1.4f, vy = 1.4f + (hash1(i, 5) + 1) * 1.1f, vz = hash1(i, 6) * 0.8f;
+    float y = cy + vy * tt - 3.2f * tt * tt;
+    float t_land = (vy + my_sqrt_f(vy * vy + 4 * 3.2f * cy)) / (2 * 3.2f);
+    float tm = tt < t_land ? tt : t_land;  // after landing it stays put
+    if (y < 0.02f) y = 0.02f;
+    ScreenVert a, e;
+    float ang = (hash1(i, 7) * 6 + 8) * tm;
+    float l = 0.05f + 0.04f * (hash1(i, 8) + 1);
+    world_pt(cx + vx * tm, y, cz + vz * tm, &a);
+    e.x = a.x + (int32_t)(l * px * sin_lookup((int32_t)(ang * 10430)) / TRIG_MAX_RATIO);
+    e.y = a.y + (int32_t)(l * px * cos_lookup((int32_t)(ang * 10430)) / TRIG_MAX_RATIO);
+    mix_pattern(GColorBlack, GColorDarkGray, i & 1 ? 9 : 5, pat);
+    beam(fb, fb_h, &a, &e, (int32_t)(0.035f * px), pat);
+  }
+
+  // the fireball: a lumpy cluster of blobs, white-yellow hot, then orange and
+  // red, darkening into smoke as it collapses
+  if (b < 1000) {
+    float grow = 1.0f - my_exp2(-b / 90.0f);
+    float shrink = 1.0f - 0.5f * ramp(b, 500, 1000);
+    float heat = ramp(b, 0, 900);  // 0 white hot .. 1 burnt out
+    for (int layer = 0; layer < 3; layer++) {  // outer, middle, core
+      GColor lo, hi;
+      int mix;
+      if (layer == 0) { lo = heat > 0.6f ? GColorDarkGray : GColorDarkCandyAppleRed; hi = GColorRed;
+                        mix = (int)(12 * (1 - heat)); }
+      else if (layer == 1) { lo = GColorRed; hi = GColorOrange; mix = (int)(16 * (1 - heat)); }
+      else { lo = GColorOrange; hi = heat < 0.25f ? GColorWhite : GColorYellow; mix = (int)(16 * (1 - heat)); }
+      if (layer > 0 && heat > 0.75f) break;
+      mix_pattern(lo, hi, mix, pat);
+      float size = (layer == 0 ? 0.42f : layer == 1 ? 0.3f : 0.18f) * grow * shrink;
+      for (int i = 0; i < 6; i++) {
+        float spread = 0.32f * grow;
+        ScreenVert c;
+        world_pt(cx + hash1(i, 11) * spread, cy + hash1(i, 12) * spread * 0.8f + 0.25f * heat,
+                 cz + hash1(i, 13) * spread * 0.4f, &c);
+        float r = size * (0.75f + 0.25f * hash1(i, 14 + layer));
+        fill_disc(fb_h, c.x, c.y, (int32_t)(r * px), 256, pat);
+      }
+    }
+  }
+
+  // the flash
+  if (b < 160) {
+    int lvl = 16 - b / 10;
+    for (int y = 0; y < fb_h && y < MAX_ROWS; y++) {
+      const uint8_t *bayer = &BAYER[(y & 3) * 4];
+      for (int32_t x = s_row_min[y]; x <= s_row_max[y]; x++) {
+        if (bayer[x & 3] < lvl) s_row_data[y][x] = GColorWhiteARGB8;
+      }
+    }
+  }
+}
+
+// the laser shining straight at you: a red glare in the middle of the eye
+static void render_glare(GBitmap *fb, int fb_h) {
+  if (s_spot_ms < 0 || s_spot_ms >= SPOT_KILL) return;
+  float f = spot_aim(s_spot_ms);
+  if (f > 0.12f || f < -0.12f) return;  // not quite on you yet
+  uint8_t halo[16], core[16];
+  mix_pattern(GColorBlack, GColorRed, (s_spot_ms / 80) & 1 ? 9 : 12, halo);
+  mix_pattern(GColorRed, GColorMelon, 8, core);
+  fill_ring(fb, fb_h, 0, 560, halo);
+  fill_ring(fb, fb_h, 0, 300, core);
+}
+
+// getting shot: red creeping in from the edges, filling the screen at the
+// end, then fading
+static void render_damage(int fb_h) {
+  if (s_spot_ms < 0 || s_defective) return;  // defective: no bullets, no harm
+  float d = ramp(s_spot_ms, SPOT_FIRE, SPOT_KILL);
+  float fade = 1.0f - ramp(s_spot_ms, SPOT_KILL, SPOT_END);
+  if (d <= 0 || fade <= 0) return;
+  int32_t half = (fb_h < 228 ? fb_h : 228) / 2;
+  int32_t band = (int32_t)(half * (0.15f + 0.9f * d * d));  // how far in the red reaches
+  int32_t full = (int32_t)(16 * fade);                      // density at the edge
+  if (band < 1) return;
+  if (band > 130) band = 130;
+  // colour by distance to the nearest edge and dither cell, worked out once:
+  // 0 = leave the pixel alone
+  static uint8_t col[4][4][130];  // [y & 3][x & 3][distance]
+  for (int32_t e = 0; e < band; e++) {
+    int32_t l = full * (band - e) / band;
+    for (int k = 0; k < 16; k++) {
+      int32_t b = BAYER[k];
+      col[k >> 2][k & 3][e] = b < l ? (b < l / 2 ? GColorRedARGB8 : GColorDarkCandyAppleRedARGB8) : 0;
+    }
+  }
+  for (int y = 0; y < fb_h && y < MAX_ROWS; y++) {
+    if ((y & 31) == 0) audio_pump();
+    uint8_t *row = s_row_data[y];
+    int32_t x0 = s_row_min[y], x1 = s_row_max[y];
+    int32_t dy = y < fb_h - 1 - y ? y : fb_h - 1 - y;
+    const uint8_t (*c)[130] = col[y & 3];
+    // the sides: distance to the left or right edge (up to dy, then dy)
+    int32_t side = band < dy ? band : dy;
+    int32_t w = (x1 - x0 + 2) / 2;
+    if (side > w) side = w;
+    for (int32_t d = 0; d < side; d++) {
+      int32_t xl = x0 + d, xr = x1 - d;
+      uint8_t v = c[xl & 3][d];
+      if (v) row[xl] = v;
+      v = c[xr & 3][d];
+      if (v) row[xr] = v;
+    }
+    // top and bottom rows: the middle is all dy from the edge
+    if (dy < band) {
+      uint8_t m[4] = { c[0][dy], c[1][dy], c[2][dy], c[3][dy] };
+      if (!(m[0] | m[1] | m[2] | m[3])) continue;
+      for (int32_t x = x0 + side; x <= x1 - side; x++) {
+        uint8_t v = m[x & 3];
+        if (v) row[x] = v;
+      }
+    }
+  }
+}
+
 static void schedule_frame(void);
 static uint32_t s_draw_ms;  // how long the last frame took to draw
 
@@ -1232,24 +2065,69 @@ static void canvas_update(Layer *layer, GContext *ctx) {
   s_tip_ms = DEBUG_TIP;
   s_tip_dir = 1;
 #endif
+#ifdef DEBUG_SPOT
+#ifdef DEBUG_BOOM
+  s_spot_boom = true;
+#endif
+#ifdef DEBUG_FIRE
+  s_spot_fire = true;
+  s_spot_boom = true;
+#endif
+  s_spot_ms = DEBUG_SPOT;
+  s_spot_y0 = -SCAN_YAW;  // spotted you while looking off to one side
+  s_spot_p0 = SCAN_PITCH;
+  s_out = true;
+#endif
+#ifdef DEBUG_KO
+  s_ko = true;
+  s_ko_ms = DEBUG_KO;
+#ifdef DEBUG_KO_DIR
+  s_ko_dir = DEBUG_KO_DIR;
+#else
+  s_ko_dir = 1;
+#endif
+  s_ko_view = 1000;
+  s_out = true;
+  ko_rest_point();
+#endif
 #endif
   float zoom = ease(s_zoom_p);
-  float wings = s_out ? (s_wing_p >= 1000 ? 1.0f : ease_back_out(s_wing_p))
-                      : ease(s_wing_p);  // no overshoot when closing
+  float wings = s_out && !s_ko ? (s_wing_p >= 1000 ? 1.0f : ease_back_out(s_wing_p))
+                              : ease(s_wing_p);  // no overshoot when closing
+  s_wings = wings;
 
   setup_roll();
   setup_camera(bounds, zoom);
-  bool have_model = ensure_model();
+  // close up, the detailed picture covers the whole screen: no need for the
+  // room or the low-poly model (which then isn't even loaded)
+  int closeup = closeup_level();
+  bool have_model = closeup < 16 && ensure_model();
 
   GBitmap *fb = graphics_capture_frame_buffer(ctx);
   if (fb) {
     cache_rows(fb);
-    setup_mask(gbitmap_get_bounds(fb).size.h);
-    render_room(fb);
-    audio_pump();
-    if (have_model) render_model(fb, bounds, wings);
-    render_eye(fb);
-    if (s_wing_p == 1000) render_laser(fb);
+    int fb_h = gbitmap_get_bounds(fb).size.h;
+    setup_mask(fb_h);
+    if (closeup < 16) {
+      render_room(fb);
+      audio_pump();
+      render_claw(fb, fb_h, false);
+      if (have_model && !turret_gone()) render_model(fb, bounds, wings);
+    }
+    if (closeup > 0) render_closeup(fb_h, closeup);
+    if (!turret_gone()) render_eye(fb);
+    if ((ko_firing() || spot_firing()) && have_model && !s_defective) render_guns(fb, fb_h);
+    render_claw(fb, fb_h, true);
+    if (!turret_gone()) render_glare(fb, fb_h);
+    render_flames(fb_h);
+    render_boom(fb, fb_h);
+    render_damage(fb_h);
+    // the laser on top of the red, so you see it look away and switch off
+    // (on fire, its laser cuts out as it catches)
+    bool laser = s_spot_ms >= 0 ? s_spot_ms < (s_spot_fire ? SPOT_KILL + 300
+                                               : s_spot_boom ? DEF_BOOM : SPOT_LASER_OFF)
+                                : !s_laser_off;
+    if (s_wing_p == 1000 && ko_power() == 16 && laser) render_laser(fb);
     graphics_release_frame_buffer(ctx, fb);
   }
 
@@ -1290,6 +2168,112 @@ static uint64_t anim_ms(void) {
 #endif
 }
 
+// a random line for the turret in use: the regular or the defective one
+static void say(int first, int count, int def_first, int def_count) {
+  if (s_defective) audio_play_random(AUDIO_CH_VOICE, def_first, def_count);
+  else audio_play_random(AUDIO_CH_VOICE, first, count);
+}
+
+// Knocked over: the timeline's sounds, panels and scanning
+static void ko_step(int32_t dt) {
+  int32_t t0 = s_ko_ms, t = s_ko_ms + dt;
+  s_ko_ms = t;
+#define PASSED(ms) (t0 < (ms) && t >= (ms))
+  if (PASSED(1)) say(VOICE_TIPPED_FIRST, VOICE_TIPPED_COUNT, VOICE_DEF_PANIC_FIRST, VOICE_DEF_PANIC_COUNT);
+  // the 4-shot burst (or, defective, the clicks) again and again while it fires
+  int every = s_defective ? DRY_EVERY : KO_FIRE_EVERY;
+  int shot = s_defective ? VOICE_SFX_DRYFIRE : VOICE_SFX_FIRE;
+  if (t > 150 && t < KO_FIRE_END && (t0 - 150) / every != (t - 150) / every) {
+    audio_play(AUDIO_CH_SFX, shot);
+  }
+  if (PASSED(150)) audio_play(AUDIO_CH_SFX, shot);
+  if (PASSED(KO_FIRE_END)) {
+    audio_play(AUDIO_CH_SFX, VOICE_SFX_DIE);
+    say(VOICE_DISABLED_FIRST, VOICE_DISABLED_COUNT, VOICE_DEF_GIVEUP_FIRST, VOICE_DEF_GIVEUP_COUNT);
+  }
+  if (PASSED(KO_SWAP)) roll_type();  // the claw brings a new turret: which kind?
+  if (PASSED(KO_POWER)) {
+    audio_play(AUDIO_CH_SFX, VOICE_SFX_DEPLOY);
+    say(VOICE_DEPLOY_FIRST, VOICE_DEPLOY_COUNT, VOICE_DEF_WAKE_FIRST, VOICE_DEF_WAKE_COUNT);
+  }
+#undef PASSED
+
+  if (t < KO_FIRE_END) {
+    // thrashing about: panels and laser sweep three times as fast
+    step(&s_wing_p, 1000, dt, WINGS_MS);
+    step(&s_scan_p, 1000, dt, SCAN_RAMP_MS / 2);
+    s_scan_ms += 2 * dt;
+  } else {
+    step(&s_scan_p, 0, dt, SCAN_RAMP_MS);       // powering down: settle,
+    if (t > KO_FIRE_END + 150) step(&s_wing_p, 0, dt, 600);  // fold away
+  }
+  if (t >= KO_SWAP) {
+    // the new turret: panels shut, upright, not scanning
+    s_wing_p = 0;
+    s_scan_p = 0;
+    s_scan_ms = 0;
+  }
+  if (t >= KO_END) {
+    s_ko = false;
+    s_out = false;  // zoom back in to the new turret's eye
+  }
+}
+
+// Spotted: firing at you until you knock it over, or it gets you
+static void spot_step(int32_t dt) {
+  int32_t t0 = s_spot_ms, t = s_spot_ms + dt;
+  s_spot_ms = t;
+  int every = s_defective ? DRY_EVERY : KO_FIRE_EVERY;
+  int shot = s_defective ? VOICE_SFX_DRYFIRE : VOICE_SFX_FIRE;
+  if (t > SPOT_FIRE && t < SPOT_KILL && (t0 - SPOT_FIRE) / every != (t - SPOT_FIRE) / every) {
+    audio_play(AUDIO_CH_SFX, shot);
+  }
+  if (t0 <= SPOT_FIRE && t > SPOT_FIRE) audio_play(AUDIO_CH_SFX, shot);
+  if (s_defective && t0 < SPOT_KILL && t >= SPOT_KILL) {
+    // out of "bullets": bursts into flames, panics (about to blow), or makes excuses
+    if (s_spot_fire) audio_play(AUDIO_CH_SFX, VOICE_SFX_BURN);
+    else if (s_spot_boom) audio_play_random(AUDIO_CH_VOICE, VOICE_DEF_PANIC_FIRST, VOICE_DEF_PANIC_COUNT);
+    else audio_play_random(AUDIO_CH_VOICE, VOICE_DEF_NO_BULLETS_FIRST, VOICE_DEF_NO_BULLETS_COUNT);
+  }
+  if (s_spot_fire && t < DEF_BOOM) {
+    int32_t a = t0 - SPOT_KILL, b = t - SPOT_KILL;
+    if (a >= 0 && a / 950 != b / 950) audio_play(AUDIO_CH_SFX, VOICE_SFX_BURN);  // keeps burning
+    if (a < FIRE_PANIC && b >= FIRE_PANIC) {
+      // "I'm on fire!", or one of the panic lines
+      if (flip() > 0) audio_play_random(AUDIO_CH_VOICE, VOICE_DEF_ON_FIRE_FIRST, VOICE_DEF_ON_FIRE_COUNT);
+      else audio_play_random(AUDIO_CH_VOICE, VOICE_DEF_PANIC_FIRST, VOICE_DEF_PANIC_COUNT);
+    }
+  }
+  if (s_spot_boom) {
+    if (t0 < DEF_BOOM && t >= DEF_BOOM) audio_play(AUDIO_CH_SFX, VOICE_SFX_EXPLODE);
+    if (t >= DEF_BOOM + BOOM_LEN) {
+      // the smoke clears: the claw brings a new turret (the knock-over's second half)
+      s_spot_ms = -1;
+      s_spot_boom = false;
+      s_spot_fire = false;
+      s_ko = true;
+      s_ko_ms = KO_SWAP;
+      s_ko_dir = 1;
+      s_ko_cx = (int32_t)(s_hdr.center[0] / s_hdr.vscale);
+      s_wing_p = 0;
+      s_scan_p = 0;
+      s_scan_ms = 0;
+      roll_type();
+    }
+    return;
+  }
+  if (t >= SPOT_END) {
+    // got you: back to sleep, looking straight ahead with the laser off
+    s_spot_ms = -1;
+    s_out = false;
+    s_laser_off = true;
+    s_scan_p = 0;
+    s_scan_ms = 0;
+    if (!s_defective) audio_play_random(AUDIO_CH_VOICE, VOICE_KILLED_FIRST, VOICE_KILLED_COUNT);
+    audio_play(AUDIO_CH_SFX, VOICE_SFX_RETRACT);
+  }
+}
+
 static void frame_cb(void *data) {
   s_timer = NULL;
   audio_pump();
@@ -1307,7 +2291,36 @@ static void frame_cb(void *data) {
   if (dt > 150) dt = 150;
 #endif
 
-  if (s_zoom_p > 0) s_sway_ms += dt;
+  // knocked over or spotted: the camera holds still
+  if (s_zoom_p > 0 && !s_ko && s_spot_ms < 0) s_sway_ms += dt;
+  step(&s_ko_view, s_ko ? 1000 : 0, dt, s_ko ? KO_FALL : 700);
+
+  if (s_ko) {
+    ko_step(dt);
+    layer_mark_dirty(s_canvas);
+    return;
+  }
+  if (s_spot_ms >= 0) {
+    spot_step(dt);
+    layer_mark_dirty(s_canvas);
+    return;
+  }
+  if (s_out && s_spot_armed && s_scan_p == 1000 && (int32_t)s_scan_ms >= s_spot_at) {
+    s_spot_armed = false;  // there you are
+    scan_angles(&s_spot_y0, &s_spot_p0);  // where it was looking
+    s_spot_ms = 0;
+    // a defective turret may catch fire (and then blow up), or just blow up
+    s_spot_fire = s_defective && (rand() % 100) < s_cfg.fire_chance;
+    s_spot_boom = s_spot_fire || (s_defective && (rand() % 100) < s_cfg.explode_chance);
+    if (s_defective) {
+      audio_play_random(AUDIO_CH_VOICE, VOICE_DEF_SPOTTED_FIRST, VOICE_DEF_SPOTTED_COUNT);
+    } else {
+      // one of SPOTTED, or Target acquired / I see you
+      int n = rand() % (VOICE_SPOTTED_COUNT + 2);
+      audio_play(AUDIO_CH_VOICE, n < VOICE_SPOTTED_COUNT ? VOICE_SPOTTED_FIRST + n
+                 : n == VOICE_SPOTTED_COUNT ? VOICE_TARGET_ACQUIRED : VOICE_I_SEE_YOU);
+    }
+  }
 
   if (s_scan_p > 0) s_scan_ms += dt;
   if (s_tip_ms < TIP_MS) s_tip_ms += dt;
@@ -1323,7 +2336,7 @@ static void frame_cb(void *data) {
 #ifdef STORE_CAPTURE
           s_tip_dir = 1;
 #else
-          s_tip_dir = (rand() & 1) ? 1 : -1;
+          s_tip_dir = flip();
 #endif
         }
       }
@@ -1332,7 +2345,7 @@ static void frame_cb(void *data) {
     if (s_wing_p == 1000) step(&s_scan_p, 1000, dt, SCAN_RAMP_MS);
     if (s_zoom_p == 1000 && s_wing_p == 1000 && now >= s_hold_until) {
       s_out = false;
-      audio_play_random(AUDIO_CH_VOICE, VOICE_RETIRE_FIRST, VOICE_RETIRE_COUNT);
+      say(VOICE_RETIRE_FIRST, VOICE_RETIRE_COUNT, VOICE_DEF_RETIRE_FIRST, VOICE_DEF_RETIRE_COUNT);
       audio_play(AUDIO_CH_SFX, VOICE_SFX_RETRACT);
     }
   } else {
@@ -1372,7 +2385,35 @@ static void schedule_frame(void) {
 }
 
 static void tap_handler(AccelAxisType axis, int32_t direction) {
-  if (!s_out) audio_play_random(AUDIO_CH_VOICE, VOICE_DEPLOY_FIRST, VOICE_DEPLOY_COUNT);
+  if (s_ko || s_spot_boom) return;  // busy being replaced (or blowing up)
+  if (s_out && s_zoom_p == 1000) {
+    // flicked while it's out: knocked over
+    s_ko = true;
+    s_ko_ms = 0;
+    s_spot_ms = -1;  // you got it first
+    s_spot_armed = false;
+    s_spot_boom = false;
+    s_spot_fire = false;
+    s_ko_dir = flip();
+    ko_rest_point();
+    if (!s_timer) {
+      s_last_ms = now_ms();
+      schedule_frame();
+    }
+    return;
+  }
+  if (!s_out) {
+    say(VOICE_DEPLOY_FIRST, VOICE_DEPLOY_COUNT, VOICE_DEF_WAKE_FIRST, VOICE_DEF_WAKE_COUNT);
+    // roll whether it will spot you this time, and when
+    s_spot_armed = (rand() % 100) < s_cfg.see_chance;
+    s_laser_off = false;
+    s_spot_at = 700 + rand() % 1800;
+#ifndef STORE_CAPTURE
+    // pan either way (only from the close-up, so the view doesn't jump)
+    if (s_sway_ms == 0) s_sway_dir = flip();
+#endif
+  }
+  ensure_model();  // load it now, not in the middle of the first moving frame
   s_out = true;
   s_hold_until = anim_ms() + HOLD_MS;
   if (!s_timer) {
@@ -1416,18 +2457,42 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     s_cfg.volume = v < 0 ? 0 : v > 100 ? 100 : v;
     audio_set_volume(s_cfg.volume);
   }
+  if ((t = dict_find(iter, MESSAGE_KEY_SEE_CHANCE))) {
+    int32_t v = t->value->int32;
+    s_cfg.see_chance = v < 0 ? 0 : v > 100 ? 100 : v;
+  }
+  bool reroll = false;
+#ifdef HAS_DEFECTIVE
+  if ((t = dict_find(iter, MESSAGE_KEY_DEFECT_CHANCE))) {
+    int32_t v = t->value->int32;
+    v = v < 0 ? 0 : v > 100 ? 100 : v;
+    reroll = v != s_cfg.defect_chance;
+    s_cfg.defect_chance = v;
+  }
+  if ((t = dict_find(iter, MESSAGE_KEY_FIRE_CHANCE))) {
+    int32_t v = t->value->int32;
+    s_cfg.fire_chance = v < 0 ? 0 : v > 100 ? 100 : v;
+  }
+  if ((t = dict_find(iter, MESSAGE_KEY_EXPLODE_CHANCE))) {
+    int32_t v = t->value->int32;
+    s_cfg.explode_chance = v < 0 ? 0 : v > 100 ? 100 : v;
+  }
+#endif
   if ((t = dict_find(iter, MESSAGE_KEY_ROOM)) && t->type == TUPLE_BYTE_ARRAY
       && t->length == ROOM_TILES) {
     memcpy(s_cfg.room, t->value->data, ROOM_TILES);
   }
   persist_write_data(SETTINGS_KEY, &s_cfg, sizeof(s_cfg));
+  // a new chance of defective turrets: pick again now, so you see it (unless
+  // it's in the middle of something; the next new turret will use it)
+  if (reroll && !animating()) roll_type();
   layer_mark_dirty(s_canvas);
 }
 
 static void init(void) {
   srand(time(NULL));
   load_settings();
-  load_header();
+  roll_type();
   s_font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
   time_t t = time(NULL);
   update_time(localtime(&t));

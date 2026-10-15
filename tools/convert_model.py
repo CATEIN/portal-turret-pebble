@@ -1,7 +1,10 @@
-"""Convert the Sketchfab "Portal Turret" glTF (by Igrium, CC-BY-4.0) into the
-compact binary mesh read by src/c/main.c.
+"""Convert a Sketchfab turret glTF ("Portal Turret" by Igrium, CC-BY-4.0, or
+"Defective Turret - From Portal 2 (Original)" by David & 3D, CC-BY-NC-4.0)
+into the compact binary mesh read by src/c/main.c.
 
-usage: convert_model.py path/to/scene.gltf resources/turret.bin [target_tris]
+usage: convert_model.py path/to/scene.gltf resources/turret.bin [target_tris] [--profile NAME]
+
+NAME is a profile in tools/models.py (default: turret).
 
 Needs numpy, pillow and fast-simplification.
 """
@@ -12,9 +15,15 @@ import fast_simplification
 import numpy as np
 
 import gltf_load
+import models
 
-TARGET_TRIS = int(sys.argv[3]) if len(sys.argv) > 3 else 1800
-WING_CLOSE = 0.17     # how far each side panel slides in when closed
+ARGS = [a for a in sys.argv[1:] if not a.startswith('--')]
+PROFILE = sys.argv[sys.argv.index('--profile') + 1] if '--profile' in sys.argv else 'turret'
+if PROFILE in ARGS:
+    ARGS.remove(PROFILE)
+TARGET_TRIS = int(ARGS[2]) if len(ARGS) > 2 else 1800
+WING_CLOSE = models.PROFILES[PROFILE]['wing_close']  # how far each side panel slides in when closed
+GAIN = models.PROFILES[PROFILE]['gain']
 NPAL = 15             # palette entries for the shell (one more for the eye)
 MAX_GROUPS = 4
 
@@ -69,8 +78,12 @@ def visible_faces(v, f):
 
 
 def main():
-    src, dst = sys.argv[1], sys.argv[2]
+    src, dst = ARGS[0], ARGS[1]
     v, f, col, emi, grp, fnorm = gltf_load.load(src)
+    vpanel = np.zeros(len(v), int)
+    for gi in (1, 2):
+        vpanel[np.unique(f[grp == gi])] = gi
+    v = models.apply(PROFILE, v, vpanel)
 
     # eye: the emissive faces
     is_eye = emi.max(1) > 40
@@ -162,7 +175,7 @@ def main():
     pal_idx[eye_face] = NPAL
     pal = [(*np.clip(c, 0, 255).astype(int), 0) for c in cent] + [(255, 30, 0, 1)]
     # The texture is darker than the in-game look; brighten the shell a bit
-    pal = [(min(255, int(r * 1.35)), min(255, int(g * 1.35)), min(255, int(b * 1.35)), fl)
+    pal = [(min(255, int(r * GAIN)), min(255, int(g * GAIN)), min(255, int(b * GAIN)), fl)
            if fl == 0 else (r, g, b, fl) for r, g, b, fl in pal]
 
     # Fix winding from what is actually visible: faces only ever seen from

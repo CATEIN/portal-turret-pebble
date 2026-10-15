@@ -34,16 +34,24 @@ static const int8_t INDEX_TABLE[16] = {
   -1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8,
 };
 
+// clip data is read from flash this much at a time (a read has a fixed
+// cost, and a block only needs 128 bytes)
+#define CHUNK_BYTES 1024
+
 typedef struct {
   bool active;
-  uint32_t offset;     // next byte in the bank
+  uint32_t offset;     // next byte in the bank not read yet
   uint32_t remaining;  // samples left
+  uint16_t cpos, clen; // read position and fill of buf
+  uint8_t buf[CHUNK_BYTES];
   int32_t predictor;
   int step_index;
 } Channel;
 
 static Channel s_ch[NUM_CH];
 static ResHandle s_res;
+static uint16_t s_count;           // clips in the bank
+static uint32_t (*s_table)[2];     // per clip: byte offset, sample count
 static bool s_open;
 static uint8_t s_volume = 70;
 static bool s_fed;   // the open stream has been given data
@@ -82,7 +90,6 @@ static inline int16_t decode_nibble(Channel *c, uint8_t nib) {
 // mix the next block of every active channel into s_pcm; false when silent
 static bool mix_block(void) {
   static int32_t acc[BLOCK_SAMPLES];
-  static uint8_t buf[BLOCK_SAMPLES / 2];
   bool any = false;
   memset(acc, 0, sizeof(acc));
   for (int i = 0; i < NUM_CH; i++) {
@@ -90,8 +97,19 @@ static bool mix_block(void) {
     if (!c->active) continue;
     uint32_t n = c->remaining < BLOCK_SAMPLES ? c->remaining : BLOCK_SAMPLES;
     uint32_t bytes = (n + 1) / 2;
-    resource_load_byte_range(s_res, c->offset, buf, bytes);
-    c->offset += bytes;
+    if (c->cpos + bytes > c->clen) {
+      // refill: keep what's left, read up to a chunk more of this clip
+      uint32_t left = c->clen - c->cpos;
+      memmove(c->buf, c->buf + c->cpos, left);
+      uint32_t want = CHUNK_BYTES - left, clip_left = (c->remaining + 1) / 2 - left;
+      if (want > clip_left) want = clip_left;
+      resource_load_byte_range(s_res, c->offset, c->buf + left, want);
+      c->offset += want;
+      c->clen = left + want;
+      c->cpos = 0;
+    }
+    const uint8_t *buf = c->buf + c->cpos;
+    c->cpos += bytes;
     for (uint32_t k = 0; k < n; k++) {
       uint8_t b = buf[k / 2];
       acc[k] += decode_nibble(c, (k & 1) ? (b >> 4) : (b & 0x0F));
@@ -122,12 +140,30 @@ static bool mix_block(void) {
 
 static void tick(void *data);
 
+#define YIELD_EVERY_MS 6
+static bool s_in_tick;
+static uint32_t s_last_yield;
+static uint32_t pump_ms(void) {
+  time_t t; uint16_t ms; time_ms(&t, &ms);
+  return (uint32_t)t * 1000 + ms;
+}
+
 // The firmware buffer is small, so it gets topped up as full as it will go
 // on every call: from the timer, and from the renderer between chunks of
 // work, because a heavy frame would otherwise let it run dry and cut the
 // clip off.
 void audio_pump(void) {
   if (!s_open) return;
+  if (!s_in_tick) {
+    // called mid-frame: if the app has been busy for a while, step aside
+    // for a moment, or the system falls behind playing the stream
+    if (pump_ms() - s_last_yield >= YIELD_EVERY_MS) {
+      psleep(1);
+      s_last_yield = pump_ms();
+    }
+  } else {
+    s_last_yield = pump_ms();
+  }
 #if AUDIO_DEBUG
   uint32_t now = dbg_ms();
   if (s_dbg_last && now - s_dbg_last > s_dbg_max_gap) s_dbg_max_gap = now - s_dbg_last;
@@ -175,26 +211,36 @@ void audio_pump(void) {
 
 static void tick(void *data) {
   s_timer = NULL;
+  s_in_tick = true;
   audio_pump();
+  s_in_tick = false;
   if (s_open) s_timer = app_timer_register(AUDIO_TICK_MS, tick, NULL);
 }
 
 void audio_play(int channel, int id) {
   ALOG("play ch=%d id=%d muted=%d status=%d open=%d", channel, id, (int)speaker_is_muted(),
        (int)speaker_get_status(), (int)s_open);
-  if (channel < 0 || channel >= NUM_CH || s_volume == 0 || speaker_is_muted()) return;
-  s_res = resource_get_handle(RESOURCE_ID_VOICES);
-  uint16_t count;
-  resource_load_byte_range(s_res, 0, (uint8_t *)&count, 2);
-  if (id < 0 || id >= count) return;
-  uint32_t entry[2];
-  resource_load_byte_range(s_res, 4 + id * 8, (uint8_t *)entry, 8);
+  if (channel < 0 || channel >= NUM_CH || s_volume == 0) return;
+  // (asking whether the watch is muted is slow: only when opening the stream)
+  if (!s_open && speaker_is_muted()) return;
+  if (!s_table) {
+    // the clip table, read once: a sound that repeats (the guns) shouldn't
+    // go back to flash every time
+    s_res = resource_get_handle(RESOURCE_ID_VOICES);
+    resource_load_byte_range(s_res, 0, (uint8_t *)&s_count, 2);
+    s_table = malloc(s_count * sizeof(*s_table));
+    if (!s_table) return;
+    resource_load_byte_range(s_res, 4, (uint8_t *)s_table, s_count * sizeof(*s_table));
+  }
+  if (id < 0 || id >= s_count) return;
+  const uint32_t *entry = s_table[id];
 
   Channel *c = &s_ch[channel];
   c->offset = entry[0];
   c->remaining = entry[1];
   c->predictor = 0;
   c->step_index = 0;
+  c->cpos = c->clen = 0;
   c->active = true;
 
   if (!s_open) {

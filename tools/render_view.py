@@ -42,7 +42,7 @@ def load(path):
 
 
 # the room, as in render_room() in src/c/main.c
-WALL_Z, PANEL, TILE, NEAR = -1.25, 0.9, 0.45, 1.6
+WALL_Z, PANEL, TILE, NEAR = -1.25, 0.9, 0.45, 1.9
 ROOM_X0, ROOM_X1, WALL_TOP = -4.5 * PANEL, 3.5 * PANEL, 4 * PANEL
 YAW_MAX = math.radians(20)
 PITCH = math.radians(12)

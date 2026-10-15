@@ -36,7 +36,11 @@ def local_matrix(node):
     return m
 
 
-def load(path):
+def load(path, full=False):
+    """Faces with flat colours (see the module docstring). With full=True,
+    instead a dict of the smooth mesh for rendering: v, f, uv, vn (vertex
+    normals), vgrp (vertex groups), fmat (face material) and mats (per
+    material: base / emissive / normal textures or None, and factors)."""
     base = os.path.dirname(path)
     g = json.load(open(path))
     bin_data = open(os.path.join(base, g['buffers'][0]['uri']), 'rb').read()
@@ -86,9 +90,25 @@ def load(path):
         return 0
     jgroup = np.array([joint_group(n) for n in names])
 
-    tex = np.asarray(Image.open(os.path.join(base, 'textures/Turret_baseColor.png')).convert('RGB'))
-    emi = np.asarray(Image.open(os.path.join(base, 'textures/Turret_emissive.png')).convert('RGB'))
-    th, tw = tex.shape[:2]
+    # materials: base colour and emissive (texture and/or factor), normal map
+    images = {}
+
+    def image(ref):
+        uri = g['images'][g['textures'][ref['index']]['source']]['uri']
+        if uri not in images:
+            images[uri] = np.asarray(Image.open(os.path.join(base, uri)).convert('RGB'))
+        return images[uri]
+
+    mats = []
+    for m in g.get('materials', [{}]):
+        pbr = m.get('pbrMetallicRoughness', {})
+        mats.append(dict(
+            base=image(pbr['baseColorTexture']) if 'baseColorTexture' in pbr else None,
+            base_factor=np.array(pbr.get('baseColorFactor', [1, 1, 1, 1])[:3], np.float32),
+            emissive=image(m['emissiveTexture']) if 'emissiveTexture' in m else None,
+            emissive_factor=np.array(m.get('emissiveFactor', [0, 0, 0]), np.float32),
+            normal=image(m['normalTexture']) if 'normalTexture' in m else None,
+        ))
 
     def sample(img, uv):
         u = np.mod(uv[:, 0], 1.0)
@@ -98,6 +118,7 @@ def load(path):
         return img[y, x].astype(np.float32)
 
     all_v, all_f, all_col, all_emi, all_grp, all_n = [], [], [], [], [], []
+    all_uv, all_vn, all_vg, all_fm = [], [], [], []
     voff = 0
     for ni, n in enumerate(nodes):
         if 'mesh' not in n:
@@ -125,14 +146,25 @@ def load(path):
 
             # face colour: average of centroid and the three corners pulled
             # slightly towards the centroid (avoids bleeding across UV seams)
+            mat = mats[prim.get('material', 0)]
+
+            def base_at(p):
+                c = sample(mat['base'], p) if mat['base'] is not None else np.full((len(p), 3), 255.0)
+                return c * mat['base_factor']
+
+            def emi_at(p):
+                if mat['emissive'] is None:
+                    return np.tile(mat['emissive_factor'] * 255, (len(p), 1))
+                return sample(mat['emissive'], p) * mat['emissive_factor']
+
             tuv = uv[idx]                       # (F, 3, 2)
             cuv = tuv.mean(axis=1)
-            samples = [sample(tex, cuv)]
-            esamples = [sample(emi, cuv)]
+            samples = [base_at(cuv)]
+            esamples = [emi_at(cuv)]
             for c in range(3):
                 p = cuv + (tuv[:, c] - cuv) * 0.6
-                samples.append(sample(tex, p))
-                esamples.append(sample(emi, p))
+                samples.append(base_at(p))
+                esamples.append(emi_at(p))
             col = np.mean(samples, axis=0)
             em = np.mean(esamples, axis=0)
 
@@ -146,7 +178,16 @@ def load(path):
             all_emi.append(em)
             all_grp.append(fgrp)
             all_n.append(snrm[idx].mean(axis=1))
+            all_uv.append(uv)
+            all_vn.append(snrm / (np.linalg.norm(snrm, axis=1, keepdims=True) + 1e-12))
+            all_vg.append(vgrp)
+            all_fm.append(np.full(len(idx), prim.get('material', 0)))
             voff += len(v)
+
+    if full:
+        return dict(v=np.concatenate(all_v), f=np.concatenate(all_f), uv=np.concatenate(all_uv),
+                    vn=np.concatenate(all_vn), vgrp=np.concatenate(all_vg),
+                    fmat=np.concatenate(all_fm), mats=mats)
 
     return (np.concatenate(all_v), np.concatenate(all_f), np.concatenate(all_col),
             np.concatenate(all_emi), np.concatenate(all_grp), np.concatenate(all_n))
