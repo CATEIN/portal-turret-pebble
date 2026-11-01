@@ -4,6 +4,8 @@
 // The lens is a ring of 24 red wedges like the real turret's; the wedge
 // pointing at the current minute glows bright red along its whole length (the
 // long hand), the one at the hour only on its inner half (the short hand).
+// With the 24-hour dial setting the hour goes round once a day instead: a
+// wedge per hour, midnight at the top.
 // The time is printed on the shell below the eye. A wrist flick zooms out to
 // show the whole turret, then its side panels slide open (the kick rocks
 // it onto one foot and back until it settles) and it scans the room, sweeping the
@@ -27,8 +29,13 @@
 // The CPU has no FPU, so everything per-vertex and per-pixel is fixed point;
 // floats are only used for a handful of per-frame camera values.
 //
-// The mesh (~60KB with scratch buffers) is only held in RAM while it is being
-// drawn: during the flick animation, or for the single redraw each minute.
+// The mesh (~50KB with scratch buffers; ~22KB for the lighter one) is only
+// held in RAM while it is being drawn: during the flick animation, or for the
+// single redraw each minute.
+//
+// It runs on the colour Pebbles: Time 2 and Round 2 (128KB of RAM, the full
+// mesh), and Time, Time Steel and Time Round (64KB: a lighter mesh,
+// resources/turret.bin vs turret~emery.bin).
 
 #include <pebble.h>
 
@@ -43,6 +50,11 @@
 #else
 #define MODEL_RES RESOURCE_ID_TURRET_MODEL
 #define CLOSEUP_RES RESOURCE_ID_CLOSEUP
+#endif
+
+// Time 2 and Round 2 give an app 128KB of RAM, the others 64KB
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_GABBRO)
+#define BIG_RAM 1
 #endif
 
 // ---------------------------------------------------------------------------
@@ -99,11 +111,9 @@ typedef struct {
   int32_t z;     // camera depth, model units
 } ScreenVert;
 
-#define IDX_BITS 11  // draw-list entry = depth << IDX_BITS | triangle index
-
 static ScreenVert *s_sv;
-static uint32_t *s_items;
-static uint32_t *s_items_tmp;
+static uint16_t *s_items;      // the triangles to draw, sorted by depth
+static uint16_t *s_items_tmp;  // the sort's other half
 
 // shaded dither patterns, see shade()
 #define INTEN_SHIFT 2
@@ -195,9 +205,14 @@ static char s_time_buf[8];
 
 #define WALL_COLS 8
 #define WALL_ROWS 4
-#define FLOOR_COLS 16   // floor tiles are half a wall panel
-#define FLOOR_ROWS 7
+#define FLOOR_COLS 8    // floor tiles are the size of a wall panel
+#define FLOOR_ROWS 4
 #define ROOM_TILES (WALL_COLS * WALL_ROWS + FLOOR_COLS * FLOOR_ROWS)
+
+// before 1.2 the floor tiles were half a panel: 16 x 7 of them
+#define FLOOR_COLS_OLD 16
+#define FLOOR_ROWS_OLD 7
+#define ROOM_TILES_OLD (WALL_COLS * WALL_ROWS + FLOOR_COLS_OLD * FLOOR_ROWS_OLD)
 
 // A byte per tile (wall rows bottom-up, then floor rows back to front): bits
 // 0-3 say which quarters are dark (bit = x half + 2 * row half, both counted
@@ -207,7 +222,7 @@ static char s_time_buf[8];
 #define TILE_DARK 0x0F
 
 #define SETTINGS_KEY 1
-#define SETTINGS_VERSION 5
+#define SETTINGS_VERSION 7
 
 typedef struct __attribute__((packed)) {
   uint8_t version;
@@ -218,30 +233,45 @@ typedef struct __attribute__((packed)) {
   uint8_t defect_chance;       // 0..100: % of turrets that are defective
   uint8_t explode_chance;      // 0..100: % of times a defective one blows up trying to shoot
   uint8_t fire_chance;         // 0..100: % of times it catches fire first (and then blows up)
+  uint8_t dial_24;             // the hour hand goes round once a day: a wedge per hour
 } Settings;
+
+// version 6: small floor tiles
+typedef struct __attribute__((packed)) {
+  uint8_t version, show_time, volume;
+  uint8_t room[ROOM_TILES_OLD];
+  uint8_t see_chance, defect_chance, explode_chance, fire_chance, dial_24;
+} SettingsV6;
+
+// version 5: no 24-hour dial
+typedef struct __attribute__((packed)) {
+  uint8_t version, show_time, volume;
+  uint8_t room[ROOM_TILES_OLD];
+  uint8_t see_chance, defect_chance, explode_chance, fire_chance;
+} SettingsV5;
 
 // version 4: no fire
 typedef struct __attribute__((packed)) {
   uint8_t version, show_time, volume;
-  uint8_t room[ROOM_TILES];
+  uint8_t room[ROOM_TILES_OLD];
   uint8_t see_chance, defect_chance, explode_chance;
 } SettingsV4;
 
 // version 3: no defective turrets
 typedef struct __attribute__((packed)) {
   uint8_t version, show_time, volume;
-  uint8_t room[ROOM_TILES];
+  uint8_t room[ROOM_TILES_OLD];
   uint8_t see_chance;
 } SettingsV3;
 
 // version 2: no see_chance
 typedef struct __attribute__((packed)) {
   uint8_t version, show_time, volume;
-  uint8_t room[ROOM_TILES];
+  uint8_t room[ROOM_TILES_OLD];
 } SettingsV2;
 
 // version 1: a bit per tile
-#define ROOM_BYTES_V1 ((ROOM_TILES + 7) / 8)
+#define ROOM_BYTES_V1 ((ROOM_TILES_OLD + 7) / 8)
 typedef struct __attribute__((packed)) {
   uint8_t version, show_time, volume;
   uint8_t room[ROOM_BYTES_V1];
@@ -263,37 +293,83 @@ static void default_settings(void) {
   for (int r = 0; r < WALL_ROWS; r++) {
     for (int c = 5; c < WALL_COLS; c++) s_cfg.room[r * WALL_COLS + c] = TILE_DARK;
   }
-  for (int r = 0; r < 2; r++) {
-    for (int c = 10; c < FLOOR_COLS; c++) {
-      s_cfg.room[WALL_COLS * WALL_ROWS + r * FLOOR_COLS + c] = TILE_DARK;
+  for (int c = 5; c < FLOOR_COLS; c++) s_cfg.room[WALL_COLS * WALL_ROWS + c] = TILE_DARK;
+}
+
+// is an old (half size) tile mostly dark?
+static bool old_dark(const uint8_t *old, int c, int r) {
+  uint8_t q = old[WALL_COLS * WALL_ROWS + r * FLOOR_COLS_OLD + c] & TILE_DARK;
+  int n = (q & 1) + ((q >> 1) & 1) + ((q >> 2) & 1) + ((q >> 3) & 1);
+  return n >= 2;
+}
+
+// A room saved before 1.2: the wall is the same; each floor tile takes the
+// four small tiles it now covers as its quarters (split if they differ). The
+// last row of small tiles stands in for the missing eighth.
+static void room_from_old(const uint8_t *old) {
+  memcpy(s_cfg.room, old, WALL_COLS * WALL_ROWS);
+  for (int r = 0; r < FLOOR_ROWS; r++) {
+    for (int c = 0; c < FLOOR_COLS; c++) {
+      uint8_t v = 0;
+      for (int q = 0; q < 4; q++) {
+        int oc = 2 * c + (q & 1), or_ = 2 * r + (q >> 1);
+        if (or_ >= FLOOR_ROWS_OLD) or_ = FLOOR_ROWS_OLD - 1;
+        if (old_dark(old, oc, or_)) v |= 1 << q;
+      }
+      if (v != 0 && v != TILE_DARK) v |= TILE_SPLIT;
+      s_cfg.room[WALL_COLS * WALL_ROWS + r * FLOOR_COLS + c] = v;
     }
   }
 }
 
 static void load_settings(void) {
   default_settings();
-  union { Settings v5; SettingsV4 v4; SettingsV3 v3; SettingsV2 v2; SettingsV1 v1; } saved;
+  union { Settings v7; SettingsV6 v6; SettingsV5 v5; SettingsV4 v4; SettingsV3 v3;
+          SettingsV2 v2; SettingsV1 v1; } saved;
   int n = persist_read_data(SETTINGS_KEY, &saved, sizeof(saved));
-  if (n == (int)sizeof(Settings) && saved.v5.version == SETTINGS_VERSION) {
-    s_cfg = saved.v5;
+  if (n == (int)sizeof(Settings) && saved.v7.version == SETTINGS_VERSION) {
+    s_cfg = saved.v7;
+  } else if (n == (int)sizeof(SettingsV6) && saved.v6.version == 6) {
+    s_cfg.show_time = saved.v6.show_time;
+    s_cfg.volume = saved.v6.volume;
+    room_from_old(saved.v6.room);
+    s_cfg.see_chance = saved.v6.see_chance;
+    s_cfg.defect_chance = saved.v6.defect_chance;
+    s_cfg.explode_chance = saved.v6.explode_chance;
+    s_cfg.fire_chance = saved.v6.fire_chance;
+    s_cfg.dial_24 = saved.v6.dial_24;
+  } else if (n == (int)sizeof(SettingsV5) && saved.v5.version == 5) {
+    s_cfg.show_time = saved.v5.show_time;
+    s_cfg.volume = saved.v5.volume;
+    room_from_old(saved.v5.room);
+    s_cfg.see_chance = saved.v5.see_chance;
+    s_cfg.defect_chance = saved.v5.defect_chance;
+    s_cfg.explode_chance = saved.v5.explode_chance;
+    s_cfg.fire_chance = saved.v5.fire_chance;
   } else if (n == (int)sizeof(SettingsV4) && saved.v4.version == 4) {
-    memcpy(&s_cfg, &saved.v4, sizeof(SettingsV4));  // the same, plus fire_chance
-    s_cfg.version = SETTINGS_VERSION;
+    s_cfg.show_time = saved.v4.show_time;
+    s_cfg.volume = saved.v4.volume;
+    room_from_old(saved.v4.room);
+    s_cfg.see_chance = saved.v4.see_chance;
+    s_cfg.defect_chance = saved.v4.defect_chance;
+    s_cfg.explode_chance = saved.v4.explode_chance;
   } else if (n == (int)sizeof(SettingsV3) && saved.v3.version == 3) {
     s_cfg.show_time = saved.v3.show_time;
     s_cfg.volume = saved.v3.volume;
-    memcpy(s_cfg.room, saved.v3.room, ROOM_TILES);
+    room_from_old(saved.v3.room);
     s_cfg.see_chance = saved.v3.see_chance;
   } else if (n == (int)sizeof(SettingsV2) && saved.v2.version == 2) {
     s_cfg.show_time = saved.v2.show_time;
     s_cfg.volume = saved.v2.volume;
-    memcpy(s_cfg.room, saved.v2.room, ROOM_TILES);
+    room_from_old(saved.v2.room);
   } else if (n == (int)sizeof(SettingsV1) && saved.v1.version == 1) {
     s_cfg.show_time = saved.v1.show_time;
     s_cfg.volume = saved.v1.volume;
-    for (int i = 0; i < ROOM_TILES; i++) {
-      s_cfg.room[i] = (saved.v1.room[i >> 3] >> (i & 7)) & 1 ? TILE_DARK : 0;
+    uint8_t old[ROOM_TILES_OLD];
+    for (int i = 0; i < ROOM_TILES_OLD; i++) {
+      old[i] = (saved.v1.room[i >> 3] >> (i & 7)) & 1 ? TILE_DARK : 0;
     }
+    room_from_old(old);
   }
 #ifdef STORE_ROOM
   // a showcase room: dark chamber, a white band on the wall, checkered floor
@@ -359,11 +435,16 @@ static bool ensure_model(void) {
   size_t size = resource_size(rh) - sizeof(ModelHeader);
   s_body = malloc(size);
   s_sv = malloc(sizeof(ScreenVert) * s_hdr.nverts);
-  s_items = malloc(sizeof(uint32_t) * s_hdr.ntris);
-  s_items_tmp = malloc(sizeof(uint32_t) * s_hdr.ntris);
+  s_items = malloc(sizeof(uint16_t) * s_hdr.ntris);
+  s_items_tmp = malloc(sizeof(uint16_t) * s_hdr.ntris);
+#ifdef BIG_RAM
   s_pat_cache = malloc(MAX_PAL * INTEN_LEVELS * 16);
   s_pat_ok = calloc(MAX_PAL, INTEN_LEVELS);
-  if (!s_body || !s_sv || !s_items || !s_items_tmp || !s_pat_cache || !s_pat_ok) {
+  bool pats = s_pat_cache && s_pat_ok;
+#else
+  bool pats = true;  // no room for the cache: patterns are made as needed
+#endif
+  if (!s_body || !s_sv || !s_items || !s_items_tmp || !pats) {
     APP_LOG(APP_LOG_LEVEL_ERROR, "model alloc failed (heap %d)", (int)heap_bytes_free());
     release_model();
     return false;
@@ -393,7 +474,7 @@ static void load_header(void) {
   ResHandle rh = resource_get_handle(MODEL_RES);
   resource_load_byte_range(rh, 0, (uint8_t *)&s_hdr, sizeof(ModelHeader));
   s_hdr_ok = memcmp(s_hdr.magic, MODEL_MAGIC, 4) == 0
-             && s_hdr.ntris < (1 << IDX_BITS);
+             && s_hdr.ntris < 0xFFFF;
 }
 
 // ---------------------------------------------------------------------------
@@ -468,11 +549,16 @@ static float my_sqrt(float x) {
 }
 #endif
 
+// the screen's longer side: rows (and the widest row) there can be
+#define MAX_ROWS (PBL_DISPLAY_HEIGHT > PBL_DISPLAY_WIDTH ? PBL_DISPLAY_HEIGHT : PBL_DISPLAY_WIDTH)
+
 // Close-up layout: eye radius in pixels
-#if defined(PBL_ROUND)
-#define EYE_PX 76.0f
+#if PBL_DISPLAY_WIDTH >= 260
+#define EYE_PX 76.0f   // Round 2
+#elif PBL_DISPLAY_WIDTH >= 200
+#define EYE_PX 74.0f   // Time 2
 #else
-#define EYE_PX 74.0f
+#define EYE_PX 53.0f   // 144 x 168, and the 180 x 180 Time Round
 #endif
 
 // lean angle (TRIG_MAX_ANGLE, counter-clockwise on screen): a damped sway
@@ -715,7 +801,7 @@ static void eye_pt(int32_t angle, int32_t r1000, ScreenVert *out) {
 
 static bool s_mask_on;
 static int32_t s_mx, s_my, s_ma, s_mb;
-static int16_t s_mask_l[260], s_mask_r[260];
+static int16_t s_mask_l[MAX_ROWS], s_mask_r[MAX_ROWS];
 
 // first pixel index whose centre is >= v (v in 24.8)
 static inline int32_t ceil_px(int32_t v) {
@@ -762,13 +848,13 @@ static void setup_mask(int fb_h) {
   s_mask_on = s_mb >= 6 * 256 && s_ma >= 6 * 256 && s_mb < 40000 && s_ma < 40000;
   if (!s_mask_on) {
     // nothing is masked (the rows keep no old mask from an earlier frame)
-    for (int y = 0; y < 260; y++) {
+    for (int y = 0; y < MAX_ROWS; y++) {
       s_mask_l[y] = 1;
       s_mask_r[y] = 0;
     }
     return;
   }
-  for (int y = 0; y < fb_h && y < 260; y++) {
+  for (int y = 0; y < fb_h && y < MAX_ROWS; y++) {
     int32_t dy = (y << 8) + 128 - s_my;
     s_mask_l[y] = 1;
     s_mask_r[y] = 0;
@@ -796,6 +882,7 @@ static const uint8_t BAYER[16] = {
   15, 7, 13, 5,
 };
 
+
 // light direction (camera space), scaled to 256
 #define LX (-90)
 #define LY (150)
@@ -803,8 +890,8 @@ static const uint8_t BAYER[16] = {
 #define AMBIENT 90
 #define DIFFUSE 190
 
-static void build_pattern(uint8_t pal_idx, int32_t inten, uint8_t pat[16]) {
-  const uint8_t *c = s_hdr.pal[pal_idx];
+// colour c (r, g, b) lit at inten/256, dithered
+static void build_pattern(const uint8_t *c, int32_t inten, uint8_t pat[16]) {
   int32_t lo[3], fr[3];
   for (int i = 0; i < 3; i++) {
     int32_t v = c[i] * inten / 256;
@@ -824,25 +911,32 @@ static void build_pattern(uint8_t pal_idx, int32_t inten, uint8_t pat[16]) {
   }
 }
 
+// brightness (/256) of a face with this camera-space normal (x127)
+static int32_t light(int32_t nx, int32_t ny, int32_t nz) {
+  int32_t d = (nx * LX + ny * LY + nz * LZ) / 127;
+  if (d < 0) d = 0;
+  return AMBIENT + d * DIFFUSE / 256;
+}
+
 // Dither patterns per (palette entry, brightness step), built on first use
 // and kept with the model: most triangles share a handful of them.
 _Static_assert((AMBIENT + DIFFUSE) >> INTEN_SHIFT < INTEN_LEVELS, "shade levels");
 
 static const uint8_t *shade(uint8_t pal_idx, int32_t nx, int32_t ny, int32_t nz) {
   if (pal_idx >= MAX_PAL) pal_idx = 0;
-  int32_t inten = 256;
-  if (!(s_hdr.pal[pal_idx][3] & PAL_EMISSIVE)) {
-    int32_t d = (nx * LX + ny * LY + nz * LZ) / 127;  // /127 for int8 normals
-    if (d < 0) d = 0;
-    inten = AMBIENT + d * DIFFUSE / 256;
-  }
+  int32_t inten = s_hdr.pal[pal_idx][3] & PAL_EMISSIVE ? 256 : light(nx, ny, nz);
   int lv = inten >> INTEN_SHIFT;
   if (lv >= INTEN_LEVELS) lv = INTEN_LEVELS - 1;
+#ifdef BIG_RAM
   uint8_t *pat = s_pat_cache[pal_idx][lv];
   if (!s_pat_ok[pal_idx][lv]) {
-    build_pattern(pal_idx, lv << INTEN_SHIFT, pat);
+    build_pattern(s_hdr.pal[pal_idx], lv << INTEN_SHIFT, pat);
     s_pat_ok[pal_idx][lv] = 1;
   }
+#else
+  static uint8_t pat[16];  // used straight away, before the next triangle's
+  build_pattern(s_hdr.pal[pal_idx], lv << INTEN_SHIFT, pat);
+#endif
   return pat;
 }
 
@@ -851,8 +945,27 @@ static void mix_pattern(GColor a, GColor b, int mix, uint8_t pat[16]) {
   for (int t = 0; t < 16; t++) pat[t] = BAYER[t] < mix ? b.argb : a.argb;
 }
 
-// p is the pattern's 4-pixel row; the middle of the span goes 4 pixels per store
-static inline void fill_span(uint8_t *row, int32_t x0, int32_t x1, const uint8_t *p) {
+// framebuffer rows, looked up once per frame instead of once per triangle row
+static uint8_t *s_row_data[MAX_ROWS];
+static int16_t s_row_min[MAX_ROWS], s_row_max[MAX_ROWS];
+
+static void cache_rows(GBitmap *fb) {
+  int h = gbitmap_get_bounds(fb).size.h;
+  for (int y = 0; y < h && y < MAX_ROWS; y++) {
+    GBitmapDataRowInfo row = gbitmap_get_data_row_info(fb, y);
+    s_row_data[y] = row.data;
+    s_row_min[y] = row.min_x;
+    s_row_max[y] = row.max_x;
+  }
+}
+
+static inline void put_px(int y, int x, uint8_t c) {
+  s_row_data[y][x] = c;
+}
+
+// p is row y & 3 of the pattern; the middle of the span goes 4 pixels per store
+static inline void fill_span(int y, int32_t x0, int32_t x1, const uint8_t *p) {
+  uint8_t *row = s_row_data[y];
   int32_t x = x0;
   if (x1 - x0 < 16) {  // short spans (most triangles): plain loop
     for (; x <= x1; x++) row[x] = p[x & 3];
@@ -866,21 +979,6 @@ static inline void fill_span(uint8_t *row, int32_t x0, int32_t x1, const uint8_t
     for (; x + 3 <= x1; x += 4) *wp++ = w;
   }
   for (; x <= x1; x++) row[x] = p[x & 3];
-}
-
-// framebuffer rows, looked up once per frame instead of once per triangle row
-#define MAX_ROWS 260
-static uint8_t *s_row_data[MAX_ROWS];
-static int16_t s_row_min[MAX_ROWS], s_row_max[MAX_ROWS];
-
-static void cache_rows(GBitmap *fb) {
-  int h = gbitmap_get_bounds(fb).size.h;
-  for (int y = 0; y < h && y < MAX_ROWS; y++) {
-    GBitmapDataRowInfo row = gbitmap_get_data_row_info(fb, y);
-    s_row_data[y] = row.data;
-    s_row_min[y] = row.min_x;
-    s_row_max[y] = row.max_x;
-  }
 }
 
 // dx/dy in 16.16 (dy > 0). No 64-bit division: there is no hardware for it,
@@ -925,30 +1023,40 @@ static void raster_tri(GBitmap *fb, int fb_h, const ScreenVert *a,
     if (x0 < s_row_min[y]) x0 = s_row_min[y];
     if (x1 > s_row_max[y]) x1 = s_row_max[y];
     if (x0 > x1) continue;
-    uint8_t *data = s_row_data[y];
     const uint8_t *p = &pat[(y & 3) * 4];
     if (masked && s_mask_l[y] <= s_mask_r[y]) {
       int32_t ml = s_mask_l[y], mr = s_mask_r[y];
-      fill_span(data, x0, x1 < ml - 1 ? x1 : ml - 1, p);
-      fill_span(data, x0 > mr + 1 ? x0 : mr + 1, x1, p);
+      fill_span(y, x0, x1 < ml - 1 ? x1 : ml - 1, p);
+      fill_span(y, x0 > mr + 1 ? x0 : mr + 1, x1, p);
     } else {
-      fill_span(data, x0, x1, p);
+      fill_span(y, x0, x1, p);
     }
   }
 }
 
-// LSD radix sort of 24-bit keys, ascending; the result ends up in tmp
-static void sort_items(uint32_t *a, uint32_t *tmp, int n) {
+// A triangle's depth key: its corners' summed depth, from the nearest
+// triangle's, scaled into 16 bits. Worked out again when needed rather than
+// stored: that's 2 bytes a triangle less, which the 64KB watches need.
+static uint32_t s_dmin;
+static int s_dshift;
+
+static inline uint32_t tri_key(int i) {
+  const ModelTri *t = &s_tris[i];
+  return ((uint32_t)(s_sv[t->v[0]].z + s_sv[t->v[1]].z + s_sv[t->v[2]].z) - s_dmin) >> s_dshift;
+}
+
+// LSD radix sort of triangle indices by tri_key, ascending, in two passes
+// (through tmp and back into a)
+static void sort_items(uint16_t *a, uint16_t *tmp, int n) {
   uint16_t count[256];
-  for (int shift = 0; shift < 24; shift += 8) {
+  for (int shift = 0; shift < 16; shift += 8) {
     memset(count, 0, sizeof(count));
-    for (int i = 0; i < n; i++) count[(a[i] >> shift) & 0xFF]++;
+    for (int i = 0; i < n; i++) count[(tri_key(a[i]) >> shift) & 0xFF]++;
     uint16_t sum = 0;
     for (int i = 0; i < 256; i++) { uint16_t c = count[i]; count[i] = sum; sum += c; }
-    for (int i = 0; i < n; i++) tmp[count[(a[i] >> shift) & 0xFF]++] = a[i];
-    uint32_t *sw = a; a = tmp; tmp = sw;
+    for (int i = 0; i < n; i++) tmp[count[(tri_key(a[i]) >> shift) & 0xFF]++] = a[i];
+    uint16_t *sw = a; a = tmp; tmp = sw;
   }
-  // three passes: the result is in the caller's tmp
 }
 
 // current scan direction: yaw (+ = turret's left, screen right) and pitch
@@ -1133,21 +1241,18 @@ static void render_model(GBitmap *fb, GRect bounds, float wings) {
     uint32_t depth = (uint32_t)(a->z + b->z + c->z);
     if (depth < dmin) dmin = depth;
     if (depth > dmax) dmax = depth;
-    s_items_tmp[n] = depth;
     s_items[n++] = i;
   }
-  // depth relative to the nearest, scaled into 13 bits: with the 11-bit
-  // index that's a 24-bit key, three radix passes
-  int dshift = 0;
-  while (n && ((dmax - dmin) >> dshift) >= (1u << (24 - IDX_BITS))) dshift++;
-  for (int k = 0; k < n; k++) s_items[k] |= ((s_items_tmp[k] - dmin) >> dshift) << IDX_BITS;
+  s_dmin = dmin;
+  s_dshift = 0;
+  while (n && ((dmax - dmin) >> s_dshift) >= 0x10000) s_dshift++;
   audio_pump();
   sort_items(s_items, s_items_tmp, n);
 
   int fb_h = gbitmap_get_bounds(fb).size.h;
   int32_t ys = s_cam.ys, yc = s_cam.yc;
   for (int k = n - 1; k >= 0; k--) {  // far first (the largest depth)
-    int idx = s_items_tmp[k] & ((1 << IDX_BITS) - 1);
+    int idx = s_items[k];
     const ModelTri *t = &s_tris[idx];
     if ((k & 255) == 0) audio_pump();
     const int8_t *nm = &s_normals[idx * 3];
@@ -1253,7 +1358,10 @@ static void render_eye(GBitmap *fb) {
   // 24 radial wedges, darkening towards the rim like the real lens. The
   // wedge nearest the minute hand glows along its whole length; the one
   // nearest the hour hand glows only on its inner half.
-  int hour_wedge = (((s_now.tm_hour % 12) * 60 + s_now.tm_min) * WEDGES + 360) / 720 % WEDGES;
+  // the nearest wedge to the hour hand: a 12-hour dial, or (setting) 24 hours
+  int day_min = s_now.tm_hour * 60 + s_now.tm_min;
+  int hour_wedge = s_cfg.dial_24 ? (day_min + 30) / 60 % WEDGES
+                                 : ((day_min % 720) * WEDGES + 360) / 720 % WEDGES;
   int32_t half = TRIG_MAX_ANGLE / WEDGES * 30 / 100;  // 60% wedge, 40% gap
   int min_wedge = (s_now.tm_min * WEDGES + 30) / 60 % WEDGES;
   uint8_t dim[4][16], hot[4][16];
@@ -1289,8 +1397,8 @@ static void render_eye(GBitmap *fb) {
 
 #define WALL_Z (-1.25f)
 #define WALL_PANEL 0.9f
-#define FLOOR_TILE 0.45f
-#define FLOOR_NEAR 1.9f   // the 7 rows of floor tiles, all full size
+#define FLOOR_TILE 0.9f   // as big as a wall panel
+#define FLOOR_NEAR (WALL_Z + FLOOR_ROWS * FLOOR_TILE)
 
 static void room_quad(GBitmap *fb, int fb_h, int32_t q[4][3], const uint8_t pat[16]) {
   ScreenVert sv[4];
@@ -1358,7 +1466,7 @@ static void seam_line(int fb_h, const ScreenVert *p0, const ScreenVert *p1, uint
   int32_t err = ddx - ddy;
   for (;;) {
     if (ay >= 0 && ay < fb_h && ax >= s_row_min[ay] && ax <= s_row_max[ay]) {
-      s_row_data[ay][ax] = color;
+      put_px(ay, ax, color);
     }
     if (ax == bx && ay == by) break;
     int32_t e2 = 2 * err;
@@ -1480,10 +1588,10 @@ static void render_room(GBitmap *fb) {
   };
   render_grid(fb, fb_h, &floor);
 
-  // where the wall meets the floor, by floor quarter (a wall quarter is two
-  // floor quarters wide), with the same rule as the seams
+  // where the wall meets the floor, by quarter (the tiles line up), with the
+  // same rule as the seams
   for (int c = 0; c < FLOOR_COLS * 2;) {
-    #define SKIRT(c) KIND_(grid_dark(&wall, (c) >> 1, 0), grid_dark(&floor, c, 0))
+    #define SKIRT(c) KIND_(grid_dark(&wall, c, 0), grid_dark(&floor, c, 0))
     #define KIND_(d0, d1) ((d0) == (d1) ? 1 + (d0) : 0)
     int k = SKIRT(c);
     int e = c + 1;
@@ -1549,7 +1657,7 @@ static void set_type(bool defective) {
 static void roll_type(void) {
 #if defined(DEBUG_DEFECTIVE) && defined(HAS_DEFECTIVE)
   set_type(DEBUG_DEFECTIVE);
-#elif defined(HAS_DEFECTIVE)
+#elif defined(HAS_DEFECTIVE) && !defined(STORE_TIME)
   set_type((rand() % 100) < s_cfg.defect_chance);
 #else
   set_type(false);
@@ -1588,7 +1696,6 @@ static void render_closeup(int fb_h, int level) {
                                rows[0], (uint32_t)count * s_cu_stride);
     }
     const uint8_t *row = rows[0] + (vy - first) * s_cu_stride;
-    uint8_t *dst = s_row_data[y];
     const uint8_t *bayer = &BAYER[(y & 3) * 4];
     int32_t x0 = s_row_min[y], x1 = s_row_max[y];
     // the eye gets drawn over the middle: skip it
@@ -1604,7 +1711,7 @@ static void render_closeup(int fb_h, int level) {
       int32_t ux = u >> 16;
       if (u < 0 || ux >= s_cu_w) continue;
       uint8_t col = s_cu_pal[(row[ux >> 1] >> ((ux & 1) * 4)) & 15];
-      if (col) dst[x] = col;
+      if (col) put_px(y, x, col);
     }
     if ((y & 31) == 0) audio_pump();
   }
@@ -1822,7 +1929,7 @@ static void fill_disc(int fb_h, int32_t cx, int32_t cy, int32_t r, int32_t squas
     int32_t x0 = ceil_px(cx - hw), x1 = ceil_px(cx + hw) - 1;
     if (x0 < s_row_min[y]) x0 = s_row_min[y];
     if (x1 > s_row_max[y]) x1 = s_row_max[y];
-    if (x0 <= x1) fill_span(s_row_data[y], x0, x1, &pat[(y & 3) * 4]);
+    if (x0 <= x1) fill_span(y, x0, x1, &pat[(y & 3) * 4]);
   }
 }
 
@@ -1918,7 +2025,7 @@ static void render_boom(GBitmap *fb, int fb_h) {
       if (x0 < s_row_min[y]) x0 = s_row_min[y];
       if (x1 > s_row_max[y]) x1 = s_row_max[y];
       const uint8_t *p = &pat[(y & 3) * 4];
-      for (int32_t x = x0; x <= x1; x++) if (p[x & 3]) s_row_data[y][x] = p[x & 3];
+      for (int32_t x = x0; x <= x1; x++) if (p[x & 3]) put_px(y, x, p[x & 3]);
     }
   }
 
@@ -1973,7 +2080,7 @@ static void render_boom(GBitmap *fb, int fb_h) {
     for (int y = 0; y < fb_h && y < MAX_ROWS; y++) {
       const uint8_t *bayer = &BAYER[(y & 3) * 4];
       for (int32_t x = s_row_min[y]; x <= s_row_max[y]; x++) {
-        if (bayer[x & 3] < lvl) s_row_data[y][x] = GColorWhiteARGB8;
+        if (bayer[x & 3] < lvl) put_px(y, x, GColorWhiteARGB8);
       }
     }
   }
@@ -2002,10 +2109,10 @@ static void render_damage(int fb_h) {
   int32_t band = (int32_t)(half * (0.15f + 0.9f * d * d));  // how far in the red reaches
   int32_t full = (int32_t)(16 * fade);                      // density at the edge
   if (band < 1) return;
-  if (band > 130) band = 130;
+  if (band > MAX_ROWS / 2) band = MAX_ROWS / 2;
   // colour by distance to the nearest edge and dither cell, worked out once:
   // 0 = leave the pixel alone
-  static uint8_t col[4][4][130];  // [y & 3][x & 3][distance]
+  static uint8_t col[4][4][MAX_ROWS / 2];  // [y & 3][x & 3][distance]
   for (int32_t e = 0; e < band; e++) {
     int32_t l = full * (band - e) / band;
     for (int k = 0; k < 16; k++) {
@@ -2015,10 +2122,9 @@ static void render_damage(int fb_h) {
   }
   for (int y = 0; y < fb_h && y < MAX_ROWS; y++) {
     if ((y & 31) == 0) audio_pump();
-    uint8_t *row = s_row_data[y];
     int32_t x0 = s_row_min[y], x1 = s_row_max[y];
     int32_t dy = y < fb_h - 1 - y ? y : fb_h - 1 - y;
-    const uint8_t (*c)[130] = col[y & 3];
+    const uint8_t (*c)[MAX_ROWS / 2] = col[y & 3];
     // the sides: distance to the left or right edge (up to dy, then dy)
     int32_t side = band < dy ? band : dy;
     int32_t w = (x1 - x0 + 2) / 2;
@@ -2026,9 +2132,9 @@ static void render_damage(int fb_h) {
     for (int32_t d = 0; d < side; d++) {
       int32_t xl = x0 + d, xr = x1 - d;
       uint8_t v = c[xl & 3][d];
-      if (v) row[xl] = v;
+      if (v) put_px(y, xl, v);
       v = c[xr & 3][d];
-      if (v) row[xr] = v;
+      if (v) put_px(y, xr, v);
     }
     // top and bottom rows: the middle is all dy from the edge
     if (dy < band) {
@@ -2036,7 +2142,7 @@ static void render_damage(int fb_h) {
       if (!(m[0] | m[1] | m[2] | m[3])) continue;
       for (int32_t x = x0 + side; x <= x1 - side; x++) {
         uint8_t v = m[x & 3];
-        if (v) row[x] = v;
+        if (v) put_px(y, x, v);
       }
     }
   }
@@ -2405,7 +2511,11 @@ static void tap_handler(AccelAxisType axis, int32_t direction) {
   if (!s_out) {
     say(VOICE_DEPLOY_FIRST, VOICE_DEPLOY_COUNT, VOICE_DEF_WAKE_FIRST, VOICE_DEF_WAKE_COUNT);
     // roll whether it will spot you this time, and when
+#ifdef STORE_CAPTURE
+    s_spot_armed = false;  // the store GIF shows a plain flick
+#else
     s_spot_armed = (rand() % 100) < s_cfg.see_chance;
+#endif
     s_laser_off = false;
     s_spot_at = 700 + rand() % 1800;
 #ifndef STORE_CAPTURE
@@ -2452,6 +2562,7 @@ static void window_unload(Window *window) {
 static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *t;
   if ((t = dict_find(iter, MESSAGE_KEY_SHOW_TIME))) s_cfg.show_time = t->value->int32 != 0;
+  if ((t = dict_find(iter, MESSAGE_KEY_DIAL_24))) s_cfg.dial_24 = t->value->int32 != 0;
   if ((t = dict_find(iter, MESSAGE_KEY_VOLUME))) {
     int32_t v = t->value->int32;
     s_cfg.volume = v < 0 ? 0 : v > 100 ? 100 : v;

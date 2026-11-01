@@ -5,11 +5,13 @@ so the eye view has no low-poly facets. The watch shows this picture behind
 the eye and dissolves into its own low-poly model as it zooms out.
 
 usage: render_closeup.py model/scene.gltf resources/turret.bin resources/closeup
-           [--profile NAME] [--preview DIR]
+           [--profile NAME] [--platforms a,b,...] [--preview DIR]
 
-Writes resources/closeup~emery.bin and closeup~gabbro.bin (one resource,
-a file per platform; the last argument is the name before the ~). NAME is a
-profile in tools/models.py (default: turret). Each file:
+Writes resources/closeup~emery.bin, ~gabbro, ~basalt and ~chalk (one
+resource, a file per platform; the last argument is the name before the ~),
+or only the --platforms named. Use each platform's own mesh for the camera:
+turret~emery.bin for emery and gabbro, the lighter turret.bin for basalt and chalk.
+NAME is a profile in tools/models.py (default: turret). Each file:
   u16 width, u16 height, a 16-entry palette of Pebble colour bytes (0b11rrggbb;
   entry 0 is 0 = nothing drawn there), then 4 bits per pixel, rows of
   (width + 1) / 2 bytes, the left pixel in the low nibble. The picture is
@@ -29,7 +31,13 @@ from PIL import Image
 import gltf_load
 import models
 
-PLATFORMS = {"emery": (200, 228, 74.0), "gabbro": (260, 260, 76.0)}  # w, h, EYE_PX
+# w, h, EYE_PX
+PLATFORMS = {
+    "emery": (200, 228, 74.0),
+    "gabbro": (260, 260, 76.0),
+    "basalt": (144, 168, 53.0),
+    "chalk": (180, 180, 53.0),
+}
 SS = 4                      # supersampling
 LIGHT = np.array([-90, 150, 180], float)
 AMBIENT, DIFFUSE = 90 / 256, 190 / 256
@@ -216,10 +224,16 @@ def main():
         i = args.index("--profile")
         profile = args[i + 1]
         del args[i:i + 2]
+    names = list(PLATFORMS)
+    if "--platforms" in args:
+        i = args.index("--platforms")
+        names = args[i + 1].split(",")
+        del args[i:i + 2]
     gltf, model, out = args[:3]
     mesh = gltf_load.load(gltf, full=True)
     height, eye, eye_r = header(model)
-    for name, (w, h, eye_px) in PLATFORMS.items():
+    for name in names:
+        w, h, eye_px = PLATFORMS[name]
         img, filled = render(mesh, profile, height, eye, eye_r, w, h, eye_px)
         px = to_pebble(img, filled)
         path = Path(f"{out}~{name}.bin")

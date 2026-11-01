@@ -3,8 +3,10 @@
 into the compact binary mesh read by src/c/main.c.
 
 usage: convert_model.py path/to/scene.gltf resources/turret.bin [target_tris] [--profile NAME]
+                        [--legs Y]
 
-NAME is a profile in tools/models.py (default: turret).
+NAME is a profile in tools/models.py (default: turret). --legs simplifies the
+body below height Y (the legs) on its own, so a light mesh doesn't lose them.
 
 Needs numpy, pillow and fast-simplification.
 """
@@ -21,6 +23,9 @@ ARGS = [a for a in sys.argv[1:] if not a.startswith('--')]
 PROFILE = sys.argv[sys.argv.index('--profile') + 1] if '--profile' in sys.argv else 'turret'
 if PROFILE in ARGS:
     ARGS.remove(PROFILE)
+LEGS = float(sys.argv[sys.argv.index('--legs') + 1]) if '--legs' in sys.argv else None
+if LEGS is not None:
+    ARGS.remove(sys.argv[sys.argv.index('--legs') + 1])
 TARGET_TRIS = int(ARGS[2]) if len(ARGS) > 2 else 1800
 WING_CLOSE = models.PROFILES[PROFILE]['wing_close']  # how far each side panel slides in when closed
 GAIN = models.PROFILES[PROFILE]['gain']
@@ -105,8 +110,11 @@ def main():
     out_v, out_f, out_col, out_grp, out_vg = [], [], [], [], []
     centroids = v[f].mean(1)
     total = len(f)
-    for gi in range(3):
-        m = grp == gi
+    parts = [(gi, grp == gi) for gi in range(3)]
+    if LEGS is not None:
+        low = centroids[:, 1] < LEGS
+        parts = [(0, (grp == 0) & ~low), (0, (grp == 0) & low)] + parts[1:]
+    for gi, m in parts:
         gf = f[m]
         # weld vertices split at UV seams so the simplifier sees one surface
         key = np.round(v / 1e-4).astype(np.int64)

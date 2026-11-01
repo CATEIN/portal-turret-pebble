@@ -1,6 +1,6 @@
 #include "audio.h"
 
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(PBL_SPEAKER)
 
 #include "voices.h"
 

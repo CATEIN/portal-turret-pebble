@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Capture the appstore screenshots and flick GIFs from the emulator.
 
-usage: python3 tools/capture_store.py [emery] [gabbro]   (needs Pillow and the Pebble SDK)
+usage: python3 tools/capture_store.py [emery] [gabbro] [basalt] [chalk]   (needs Pillow and the Pebble SDK)
 
 For each platform it builds special versions of the face (main.c with a few
 #defines put in front, restored afterwards), installs them on the emulator
@@ -18,7 +18,8 @@ screenshot takes, while this script screenshots it over and over and keeps
 each new picture. That way every frame is captured at its proper timing,
 however slow the emulator is. (Every frame differs from the one before, since
 the view sways the whole time the turret is zoomed out.)
-The clock shows 10:08 in all of them (STORE_TIME).
+The clock shows 10:08 in all of them, and the turret is always the regular
+one (STORE_TIME).
 """
 import subprocess
 import sys
@@ -97,7 +98,7 @@ def flick_gif(platform):
 
 
 def main():
-    platforms = sys.argv[1:] or ["emery", "gabbro"]
+    platforms = sys.argv[1:] or ["emery", "gabbro", "basalt", "chalk"]
     SHOTS.mkdir(parents=True, exist_ok=True)
     try:
         for p in platforms:

@@ -1,10 +1,14 @@
 # Portal Turret
 
-A Pebble watchface for the **Pebble Time 2** (emery) and **Pebble Round 2** (gabbro): the turret from Portal, with its eye as the clock.
+A Pebble watchface for the colour Pebbles: the turret from Portal, with its eye as the clock.
+
+- **Pebble Time 2** (emery) and **Pebble Round 2** (gabbro): the full-detail model (about 2000 triangles).
+- **Pebble Time / Time Steel** (basalt) and **Pebble Time Round** (chalk): a lighter model (about 800 triangles), since they give an app half the RAM.
+- Not the black and white Pebbles (the turret doesn't read well in black and white), nor the original Pebble and Pebble Steel.
 
 It comes in two versions, built from the same code:
 
-- **Portal Turret** (`package.json`): everything below, including the defective turret from Portal 2, with 78 voice lines. It's a big app (the Time 2's resources are about 890 KB), so installing it takes a while. The install may report that it failed: wait a minute longer, it usually installs anyway.
+- **Portal Turret** (`package.json`): everything below, including the defective turret from Portal 2, with 78 voice lines. It's a big app (the Time 2's resources are about 890 KB, for the voice lines), so installing it there takes a while. The install may report that it failed: wait a minute longer, it usually installs anyway.
 - **Portal Turret Lite** (`lite/package.json`): the regular turret only, with its 39 voice lines; about half the size (450 KB), so it installs faster. It has its own app id, so both can be installed side by side.
 
 <p>
@@ -30,10 +34,11 @@ It comes in two versions, built from the same code:
 In the Pebble app on your phone, open the watchface's settings:
 
 - **Show the time under the eye** (on by default).
+- **24-hour dial** (off by default): the hour wedge moves a wedge each hour and goes round once a day, midnight at the top, like a 24-hour clock.
 - **Volume** for the voice lines and sounds (Time 2 only). 0% turns them off.
 - **Chance of turret seeing you** (0-100%, default 25%): how often a flick ends with the turret spotting you and opening fire.
 - Not in Lite: **chance of a defective turret** (0-100%, default 15%), **chance of it exploding** when it tries to shoot you (default 100%), and **chance of it catching fire** first (default 50%; a burning turret always explodes).
-- **Test chamber**: the turret's room, drawn from the watch's angle and showing every tile either watch can show.
+- **Test chamber**: the turret's room, drawn from the watch's angle and showing whole every tile the watches can show (8 x 4 wall panels and 8 x 4 floor tiles, all the same size).
   - Tap a wall panel or floor tile to switch it between white and black.
   - Hold a tile to split it into 4 small tiles, which can then be tapped one by one. Hold the middle of a split tile, where its 4 small tiles meet, to join them back.
   - "All white", "All black" and "Default" set the whole room.
@@ -44,7 +49,7 @@ The watch keeps the settings, so they survive restarts.
 
 Close up, the eye sits on a detailed picture of the turret: the original model, textured and smoothly shaded, rendered offline through the watch's own close-up camera (`resources/closeup~<platform>.bin`) and streamed from flash a row at a time. As the camera zooms out, the picture dissolves into the live model.
 
-When zoomed out, the watch draws the turret itself: a low-poly copy of a 3D model (about 2000 triangles, `resources/turret.bin`) projected with a fixed-point camera (the watches have no FPU) and drawn with a painter's-algorithm scanline rasterizer and 4x4 ordered dithering, since the display has only 64 colours. The eye, the room and the laser go through the same camera so everything stays in place while it zooms and sways. The mesh is only loaded into RAM while the turret is on screen.
+When zoomed out, the watch draws the turret itself: a low-poly copy of a 3D model (about 2000 triangles on the Time 2 and Round 2, `resources/turret~emery.bin`; about 800 on the others, `resources/turret.bin`) projected with a fixed-point camera (the watches have no FPU) and drawn with a painter's-algorithm scanline rasterizer and 4x4 ordered dithering, since the display has only 64 colours. The eye, the room and the laser go through the same camera so everything stays in place while it zooms and sways. The mesh is only loaded into RAM while the turret is on screen. On the 64 KB watches it takes about 22 KB, with the depth sort's buffers at 4 bytes a triangle.
 
 The voice lines are IMA ADPCM, decoded and mixed on the watch and streamed to the speaker. While a sound plays, the face leaves the CPU idle between frames and pauses for a moment in the middle of long ones, since the speaker is fed in the background. The clips are read from flash 1 KB at a time, and the clip table only once.
 
@@ -69,21 +74,26 @@ The generated files are committed, so this is only needed to change them. The Py
 
     python3 -m venv venv && venv/bin/pip install numpy pillow fast-simplification pygltflib
 
-- **Model** (`resources/turret.bin`): download "Portal Turret" from [Sketchfab](https://sketchfab.com/3d-models/portal-turret-6716037b4f174677a9aeb85405716e4e) (glTF), then
+- **Models** (`resources/turret~emery.bin`, the same for `~gabbro`, and the lighter `resources/turret.bin` for the other watches): download "Portal Turret" from [Sketchfab](https://sketchfab.com/3d-models/portal-turret-6716037b4f174677a9aeb85405716e4e) (glTF), then
 
       unzip portal_turret.zip -d model
-      venv/bin/python tools/convert_model.py model/scene.gltf resources/turret.bin 2000
+      venv/bin/python tools/convert_model.py model/scene.gltf resources/turret~emery.bin 2000
+      cp resources/turret~emery.bin resources/turret~gabbro.bin
+      venv/bin/python tools/convert_model.py model/scene.gltf resources/turret.bin 650 --legs 0.45
 
   It poses the rig, removes faces you can't see from outside, simplifies each part, takes face colours from the textures, fixes face winding and finds the eye.
-- **Defective turret** (`resources/turret_defective.bin`, `resources/closeup_defective~*.bin`): download "Defective Turret - From Portal 2 (Original)" from [Sketchfab](https://sketchfab.com/3d-models/defective-turret-from-portal-2-original-4eca0877381f4208a94c7f43a08ffbdc), unzip it to `defective/`, then
+- **Defective turret** (`resources/turret_defective~emery.bin` and `~gabbro`, `resources/turret_defective.bin`, `resources/closeup_defective~*.bin`): download "Defective Turret - From Portal 2 (Original)" from [Sketchfab](https://sketchfab.com/3d-models/defective-turret-from-portal-2-original-4eca0877381f4208a94c7f43a08ffbdc), unzip it to `defective/`, then
 
-      venv/bin/python tools/convert_model.py defective/scene.gltf resources/turret_defective.bin 2000 --profile defective
-      venv/bin/python tools/render_closeup.py defective/scene.gltf resources/turret_defective.bin resources/closeup_defective --profile defective
+      venv/bin/python tools/convert_model.py defective/scene.gltf resources/turret_defective~emery.bin 2000 --profile defective
+      cp resources/turret_defective~emery.bin resources/turret_defective~gabbro.bin
+      venv/bin/python tools/convert_model.py defective/scene.gltf resources/turret_defective.bin 600 --profile defective --legs 0.4
+      venv/bin/python tools/render_closeup.py defective/scene.gltf resources/turret_defective~emery.bin resources/closeup_defective --profile defective --platforms emery,gabbro
+      venv/bin/python tools/render_closeup.py defective/scene.gltf resources/turret_defective.bin resources/closeup_defective --profile defective --platforms basalt,chalk
 
-- **Close-up pictures** (`resources/closeup~emery.bin`, `closeup~gabbro.bin`; needs the unzipped model and `resources/turret.bin`): `venv/bin/python tools/render_closeup.py model/scene.gltf resources/turret.bin resources/closeup`
-- **Settings page turret** (`src/pkjs/turret_view.js`): `venv/bin/python tools/render_view.py resources/turret.bin src/pkjs/turret_view.js`
+- **Close-up pictures** (`resources/closeup~emery.bin`, `~gabbro`, `~basalt` and `~chalk`; needs the unzipped model and the converted models, since each picture is lined up with its watch's mesh): `venv/bin/python tools/render_closeup.py model/scene.gltf resources/turret~emery.bin resources/closeup --platforms emery,gabbro` and `venv/bin/python tools/render_closeup.py model/scene.gltf resources/turret.bin resources/closeup --platforms basalt,chalk`
+- **Settings page turret** (`src/pkjs/turret_view.js`): `venv/bin/python tools/render_view.py resources/turret~emery.bin src/pkjs/turret_view.js`
 - **Voice lines and sounds** (`resources/voices.bin`, `src/c/voices.h`): save the clips from the Portal Wiki ([turret](https://theportalwiki.com/wiki/Turret_voice_lines), [defective turret](https://theportalwiki.com/wiki/Defective_Turret_voice_lines)) into a folder (file names in `tools/convert_audio.py`), make the explosion and fire sounds with `venv/bin/python tools/make_explosion.py path/to/wavs/explode.wav` and `venv/bin/python tools/make_fire.py path/to/wavs/burn.wav`, then `python3 tools/convert_audio.py path/to/wavs resources/voices.bin resources/voices_lite.bin src/c/voices.h` (`voices.bin` has every clip, `voices_lite.bin` only the regular turret's)
-- **Store screenshots and GIFs** (`store/screenshots/`): `venv/bin/python tools/capture_store.py` (uses the emulator; takes a while)
+- **Store screenshots and GIFs** (`store/screenshots/`): `venv/bin/python tools/capture_store.py emery gabbro basalt chalk` (uses the emulator; takes a while)
 - **Store banners** (`store/banner-*.png`): `venv/bin/python tools/make_store_assets.py`
 - **Icon** (`resources/images/menu_icon.png` for the watch's menu, `store/icon-*.png`): `venv/bin/python tools/make_icon.py`
 

@@ -1,6 +1,6 @@
 // The phone settings page, opened as a data: URL from showConfiguration.
 // It returns its result through pebblejs://close# as JSON:
-//   { showTime: bool, volume: 0..100, room: [bit per tile, 1 = dark] }
+//   { showTime: bool, dial24: bool, volume: 0..100, room: [bit per tile, 1 = dark] }
 //
 // The room is drawn with the same camera as the watch's zoomed-out view
 // (tools/render_view.py), so the tiles line up with what the watch shows.
@@ -28,8 +28,8 @@ var CSS = [
 
 var SCRIPT = function () {
   /* global SETTINGS, VIEW */
-  var WALL_COLS = 8, WALL_ROWS = 4, FLOOR_COLS = 16, FLOOR_ROWS = 7;
-  var WALL_Z = -1.25, PANEL = 0.9, TILE = 0.45, NEAR = 1.9;
+  var WALL_COLS = 8, WALL_ROWS = 4, FLOOR_COLS = 8, FLOOR_ROWS = 4;
+  var WALL_Z = -1.25, PANEL = 0.9, TILE = 0.9, NEAR = WALL_Z + FLOOR_ROWS * TILE;
   var X0 = -(WALL_COLS / 2) * PANEL - PANEL / 2;
 
   var room = SETTINGS.room.slice();
@@ -169,10 +169,10 @@ var SCRIPT = function () {
         }
       }
     });
-    // where the wall meets the floor (a wall quarter is two floor quarters wide)
+    // where the wall meets the floor (the tiles line up)
     var wall = GRIDS[0], floor = GRIDS[1];
     for (var fc = 0; fc < FLOOR_COLS * 2; fc++) {
-      var dw = qDark(wall, fc >> 1, 0);
+      var dw = qDark(wall, fc, 0);
       if (dw === qDark(floor, fc, 0)) seam(qPoint(floor, fc, 0), qPoint(floor, fc + 1, 0), COLORS.wallSeam[dw]);
     }
   }
@@ -315,6 +315,8 @@ var SCRIPT = function () {
   var volume = document.getElementById('volume');
   var volLabel = document.getElementById('vol');
   showTime.checked = SETTINGS.showTime;
+  var dial24 = document.getElementById('dial24');
+  dial24.checked = SETTINGS.dial24;
   volume.value = SETTINGS.volume;
   function volText() {
     volLabel.textContent = +volume.value === 0 ? 'Off' : volume.value + '%';
@@ -337,7 +339,7 @@ var SCRIPT = function () {
   });
 
   document.getElementById('save').onclick = function () {
-    var result = { showTime: showTime.checked, volume: +volume.value, seeChance: +seeChance.value,
+    var result = { showTime: showTime.checked, dial24: dial24.checked, volume: +volume.value, seeChance: +seeChance.value,
                    room: room };
     if (!SETTINGS.lite) {
       result.defectChance = +document.getElementById('defectChance').value;
@@ -363,7 +365,11 @@ module.exports = function (settings, view) {
     '<h1>' + name + '</h1><p class="sub">Settings for the watchface</p>' +
 
     '<h2>Clock</h2><div class="card"><label class="row" for="showTime">' +
-    '<span>Show the time under the eye</span><input type="checkbox" id="showTime"></label></div>' +
+    '<span>Show the time under the eye</span><input type="checkbox" id="showTime"></label>' +
+    '<label class="row" for="dial24" style="margin-top:12px">' +
+    '<span>24-hour dial</span><input type="checkbox" id="dial24"></label>' +
+    '<p class="hint">The hour wedge moves one wedge each hour and goes round once a day, ' +
+    'midnight at the top, instead of twice. The minute wedge is the same either way.</p></div>' +
 
     '<h2>Sounds</h2><div class="card"><div class="row"><span>Volume</span><span id="vol"></span></div>' +
     '<input type="range" id="volume" min="0" max="100" step="10">' +

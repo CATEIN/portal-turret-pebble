@@ -2,11 +2,11 @@
 for the phone settings page, along with the camera the page needs to draw the
 room around it in the same perspective.
 
-usage: render_view.py resources/turret.bin src/pkjs/turret_view.js
+usage: render_view.py resources/turret~emery.bin src/pkjs/turret_view.js
 
 The camera matches setup_camera() in src/c/main.c fully zoomed out with no
-sway (emery layout), framed on the page to everything the watch can show of the room while it
-sways (both watches).
+sway (emery layout). The page is framed to show whole every tile the watches
+can show any part of: at any sway, and knocked over (the view pulls back).
 """
 import base64
 import io
@@ -42,20 +42,30 @@ def load(path):
 
 
 # the room, as in render_room() in src/c/main.c
-WALL_Z, PANEL, TILE, NEAR = -1.25, 0.9, 0.45, 1.9
+WALL_Z, PANEL, TILE = -1.25, 0.9, 0.9
+WALL_COLS, WALL_ROWS, FLOOR_ROWS = 8, 4, 4
+NEAR = WALL_Z + FLOOR_ROWS * TILE
 ROOM_X0, ROOM_X1, WALL_TOP = -4.5 * PANEL, 3.5 * PANEL, 4 * PANEL
+MARGIN = 6             # page pixels around the tiles
 YAW_MAX = math.radians(20)
 PITCH = math.radians(12)
 
 
-def watch_camera(hdr, w, h, round_):
+def watch_camera(hdr, w, h, round_, ko=0):
+    """ko: -1 / +1 knocked over that way (the view pulls back and follows it)."""
     if round_:
         s1 = min(w, h) * 0.45 / math.hypot(hdr['height'] / 2, hdr['width'] / 2)
     else:
         s1 = min(h * 0.80 / hdr['height'], w * 0.90 / hdr['width'])
     c = hdr['center']
-    return dict(scale=s1, tx=c[0], ty=c[1] - 0.07 * hdr['height'], tz=c[2],
-                dist=hdr['height'] * 2.5, pitch=PITCH, cx=w / 2, cy=h / 2)
+    cam = dict(scale=s1, tx=c[0], ty=c[1] - 0.07 * hdr['height'], tz=c[2],
+               dist=hdr['height'] * 2.5, pitch=PITCH, cx=w / 2, cy=h / 2)
+    if ko:
+        # the fallen turret's middle ends up about its height to the side
+        cam['scale'] *= 0.8
+        cam['tx'] += 0.45 * (-ko * c[1] - cam['tx'])
+        cam['ty'] -= 0.12 * hdr['height']
+    return cam
 
 
 def room_hits(hdr, cam, w, h, round_, yaw):
@@ -99,23 +109,48 @@ def room_hits(hdr, cam, w, h, round_, yaw):
     return np.concatenate([p1[first_wall], p2[first_floor]])
 
 
+def tile_corners(p):
+    """The corners of the tiles these room points fall on."""
+    wall = np.abs(p[:, 2] - WALL_Z) < 1e-3
+    out = set()
+    for (x, y, z), on_wall in zip(p, wall):
+        c = min(int(math.floor((x - ROOM_X0) / PANEL)), WALL_COLS - 1)
+        if on_wall:
+            r = min(int(math.floor(y / PANEL)), WALL_ROWS - 1)
+            out.add(('w', c, r))
+        else:
+            r = min(int(math.floor((z - WALL_Z) / TILE)), FLOOR_ROWS - 1)
+            out.add(('f', c, r))
+    pts = []
+    for kind, c, r in out:
+        x0, x1 = ROOM_X0 + c * PANEL, ROOM_X0 + (c + 1) * PANEL
+        if kind == 'w':
+            pts += [(x0, r * PANEL, WALL_Z), (x1, (r + 1) * PANEL, WALL_Z)]
+        else:
+            z0, z1 = WALL_Z + r * TILE, min(NEAR, WALL_Z + (r + 1) * TILE)
+            pts += [(x0, 0, z0), (x1, 0, z0), (x0, 0, z1), (x1, 0, z1)]
+    return np.array(pts)
+
+
 def camera(hdr):
-    """Phone camera: same angle as the watch, framed to everything either
-    watch can show of the room at any sway."""
+    """Phone camera: same angle as the watch, framed to show whole every tile
+    either watch can show a part of."""
     hits = []
     for w, h, rnd in ((200, 228, False), (260, 260, True)):
-        wc = watch_camera(hdr, w, h, rnd)
-        for yaw in np.linspace(-YAW_MAX, YAW_MAX, 9):
-            hits.append(room_hits(hdr, wc, w, h, rnd, yaw))
-    hits = np.concatenate(hits)
+        for ko in (0, -1, 1):
+            wc = watch_camera(hdr, w, h, rnd, ko)
+            yaws = [0.0] if ko else np.linspace(-YAW_MAX, YAW_MAX, 9)  # knocked over it holds still
+            for yaw in yaws:
+                hits.append(room_hits(hdr, wc, w, h, rnd, yaw))
+    corners = tile_corners(np.concatenate(hits))
     cam = watch_camera(hdr, 1, 1, False)
     cam.update(scale=1.0, cx=0.0, cy=0.0)
-    uv, _ = project(cam, hits)
+    uv, _ = project(cam, corners)
     umin, vmin = uv.min(0)
     umax, vmax = uv.max(0)
-    scale = W / (umax - umin)
-    h = int(math.ceil((vmax - vmin) * scale))
-    cam.update(scale=scale, cx=-umin * scale, cy=-vmin * scale)
+    scale = (W - 2 * MARGIN) / (umax - umin)
+    h = int(math.ceil((vmax - vmin) * scale)) + 2 * MARGIN
+    cam.update(scale=scale, cx=MARGIN - umin * scale, cy=MARGIN - vmin * scale)
     return cam, h
 
 

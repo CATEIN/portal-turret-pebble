@@ -139,7 +139,7 @@ def banner_light():
     paste_with_shadow(canvas, emery, ex, ey, alpha=90)
     paste_with_shadow(canvas, gabbro, gx, gy, alpha=90)
     title(canvas, 34, 58, (40, 40, 44), (80, 80, 86),
-          ["The Portal turret for", "Pebble Time 2 and Round 2.", "Are you still there?"])
+          ["The Portal turret for", "your Pebble Time or Round.", "Are you still there?"])
     return canvas.convert("RGB")
 
 

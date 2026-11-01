@@ -21,14 +21,14 @@ licensed under Creative Commons Attribution 4.0 International
 (https://creativecommons.org/licenses/by/4.0/).
 
 Changes made: the model was posed, stripped of hidden faces, simplified to
-about 2000 triangles, given flat per-face colours taken from its textures and
+about 2000 triangles (about 800 for the smaller watches), given flat per-face colours taken from its textures and
 packed into a compact binary format; its side panels are animated by the
 watchface. These files are adaptations of the model and are shared under the
 same CC BY 4.0 license:
 
-- `resources/turret.bin` (made by `tools/convert_model.py`)
+- `resources/turret~emery.bin`, `turret~gabbro.bin` and the lighter `turret.bin` (made by `tools/convert_model.py`)
 - the turret picture in `src/pkjs/turret_view.js` (made by `tools/render_view.py`)
-- the close-up pictures (`resources/closeup~emery.bin`, `closeup~gabbro.bin`, made by `tools/render_closeup.py`)
+- the close-up pictures (`resources/closeup~*.bin`, made by `tools/render_closeup.py`)
 - the turret icon (`resources/images/menu_icon.png`, `store/icon-*.png`, made by `tools/make_icon.py`)
 - the turret in the screenshots, GIFs and banners in `store/`
 
@@ -51,8 +51,8 @@ and also scaled so its three feet stand where the regular turret's do, its side 
 open, and its colours brightened (`tools/models.py`). These adaptations are
 shared under the same CC BY-NC 4.0 license:
 
-- `resources/turret_defective.bin` (made by `tools/convert_model.py --profile defective`)
-- `resources/closeup_defective~emery.bin`, `closeup_defective~gabbro.bin` (made by
+- `resources/turret_defective~emery.bin`, `turret_defective~gabbro.bin` and `turret_defective.bin` (made by `tools/convert_model.py --profile defective`)
+- `resources/closeup_defective~*.bin` (made by
   `tools/render_closeup.py --profile defective`)
 
 Its download (`defective_turret_-_from_portal_2_original.zip`) is not included

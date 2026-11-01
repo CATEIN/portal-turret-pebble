@@ -22,7 +22,7 @@ SS = 8  # supersampling
 
 
 def render(size, eye_scale):
-    hdr, v, f, col, two, pal = render_view.load(ROOT / "resources" / "turret.bin")
+    hdr, v, f, col, two, pal = render_view.load(ROOT / "resources" / "turret~emery.bin")
     S = size * SS
     lo, hi = v.min(0), v.max(0)
     side = (hi[0] - lo[0]) * 1.5

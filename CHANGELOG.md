@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0
+
+- **Pebble Time, Time Steel and Time Round** too, as well as the Time 2 and Round 2. They get a lighter 3D model (they give an app half the RAM) and close-ups made for their screens.
+- **Bigger floor tiles**, the same size as the wall panels. Your test chamber carries over: each new tile takes the four small tiles it covers as its quarters.
+- **The test chamber on the phone** is zoomed out to show whole every tile the watch can show.
+- **24-hour dial** setting: the hour wedge goes round once a day, a wedge per hour, midnight at the top.
+
 ## 1.1.0
 
 - **Knock it over:** flick your wrist again while the turret is zoomed out and it falls over firing, shuts down, and a claw carries it away and brings in a new one.
