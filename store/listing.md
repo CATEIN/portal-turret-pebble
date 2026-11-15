@@ -32,6 +32,7 @@ Settings — because even science needs a few knobs:
 Time numbers under the eye: on or off. Some of you still need them. Fine.
 24-hour dial. One wedge per hour, once around a day. For people who think twelve hours is a cop-out.
 Volume (Time 2 only). Crank it or set it to zero and make the little thing shut its mouth.
+Sleep during Quiet Time. When your watch goes quiet, the turret says goodnight and flicks won't wake it.
 Chance it sees you. Turn it up if you like living dangerously.
 Chance of a defective turret, and of it catching fire or exploding. You’re welcome.
 Design the test chamber yourself. Tap tiles to paint them black or white. Hold one to split it into four. Make it as sterile and judgmental as you want.
@@ -39,6 +40,22 @@ Design the test chamber yourself. Tap tiles to paint them black or white. Hold o
 The tech boys say we have to put these credits here so we don’t get sued:
 
 “Portal Turret” model by Igrium, CC BY 4.0; “Defective Turret” model by David & 3D, CC BY-NC 4.0 (both on Sketchfab). Voice lines and sounds © Valve Corporation. Fan project, not affiliated with Valve. Source (MIT): github.com/CATEIN/portal-turret-pebble
+
+## Release notes (1.3.0)
+
+CHANGELOG. PAY ATTENTION.
+Quiet Time!
+
+When your watch goes quiet, so does the turret. It says goodnight and goes to sleep, and flicking your wrist won't wake it. New setting, on by default. Turn it off if you like getting shot at three in the morning.
+
+A smaller turret!
+
+The boys in the lab sliced a turret in half to see what makes it tick. Turns out in this universe, turrets are cake. Moist, delicious, perfectly symmetrical cake. So now we only ship you half of one, and your watch mirrors the other half. Same turret. Smaller download.
+The antenna is not cake. It ships whole. The defective turret is also not cake. We're not sure what it is. It ships whole too.
+And before anyone asks: no, the cake is not a lie. We ate some.
+
+Built with the newest SDK. The app uses no permissions on your phone. It never did. Now it says so.
+Still a big app. Install might say it failed. Wait a minute. It usually works.
 
 ## Release notes (1.2.0)
 
@@ -86,6 +103,21 @@ As above, with these changes: leave out the sentence about defective turrets
 and the defective turret settings line, say "39 lines" instead of "78 lines",
 credit only the "Portal Turret" model, and add at the end: "A smaller version
 of Portal Turret, without the defective turret; it installs faster."
+
+## Release notes (1.3.0)
+
+CHANGELOG. PAY ATTENTION.
+Quiet Time!
+
+When your watch goes quiet, so does the turret. It says goodnight and goes to sleep, and flicking your wrist won't wake it. New setting, on by default. Turn it off if you like getting shot at three in the morning.
+
+A smaller turret!
+
+The boys in the lab sliced a turret in half to see what makes it tick. Turns out in this universe, turrets are cake. Moist, delicious, perfectly symmetrical cake. So now we only ship you half of one, and your watch mirrors the other half. Same turret. Smaller download.
+The antenna is not cake. It ships whole.
+And before anyone asks: no, the cake is not a lie. We ate some.
+
+Built with the newest SDK. The app uses no permissions on your phone. It never did. Now it says so.
 
 ## Release notes (1.2.0)
 

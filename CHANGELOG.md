@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.3.0
 
 - **Quiet Time:** the turret says goodnight when your watch's Quiet Time starts (Time 2), and a new setting, on by default, keeps flicks from waking it while Quiet Time is on.
-- **Smaller:** the regular turret's model is stored as one half and mirrored on the watch, which makes the app about 30 KB smaller (a fifth of the Round 2 install). The defective turret stays whole.
+- **Smaller:** the regular turret's model is stored as one half and mirrored on the watch, which makes the app about 15 KB smaller on every watch (a tenth of the Round 2 install). The defective turret stays whole.
+- Built with SDK 4.44: the app now says it uses no permissions on the phone (it never used any).
 
 ## 1.2.0
 
