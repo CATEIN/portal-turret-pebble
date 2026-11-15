@@ -36,6 +36,7 @@ In the Pebble app on your phone, open the watchface's settings:
 - **Show the time under the eye** (on by default).
 - **24-hour dial** (off by default): the hour wedge moves a wedge each hour and goes round once a day, midnight at the top, like a 24-hour clock.
 - **Volume** for the voice lines and sounds (Time 2 only). 0% turns them off.
+- **Sleep during Quiet Time** (on by default): while the watch's Quiet Time is on, flicking your wrist doesn't wake the turret. Either way, on the Time 2 it says goodnight when Quiet Time starts.
 - **Chance of turret seeing you** (0-100%, default 25%): how often a flick ends with the turret spotting you and opening fire.
 - Not in Lite: **chance of a defective turret** (0-100%, default 15%), **chance of it exploding** when it tries to shoot you (default 100%), and **chance of it catching fire** first (default 50%; a burning turret always explodes).
 - **Test chamber**: the turret's room, drawn from the watch's angle and showing whole every tile the watches can show (8 x 4 wall panels and 8 x 4 floor tiles, all the same size).
@@ -49,7 +50,7 @@ The watch keeps the settings, so they survive restarts.
 
 Close up, the eye sits on a detailed picture of the turret: the original model, textured and smoothly shaded, rendered offline through the watch's own close-up camera (`resources/closeup~<platform>.bin`) and streamed from flash a row at a time. As the camera zooms out, the picture dissolves into the live model.
 
-When zoomed out, the watch draws the turret itself: a low-poly copy of a 3D model (about 2000 triangles on the Time 2 and Round 2, `resources/turret~emery.bin`; about 800 on the others, `resources/turret.bin`) projected with a fixed-point camera (the watches have no FPU) and drawn with a painter's-algorithm scanline rasterizer and 4x4 ordered dithering, since the display has only 64 colours. The eye, the room and the laser go through the same camera so everything stays in place while it zooms and sways. The mesh is only loaded into RAM while the turret is on screen. On the 64 KB watches it takes about 22 KB, with the depth sort's buffers at 4 bytes a triangle.
+When zoomed out, the watch draws the turret itself: a low-poly copy of a 3D model (about 2000 triangles on the Time 2 and Round 2, `resources/turret~emery.bin`; about 800 on the others, `resources/turret.bin`) projected with a fixed-point camera (the watches have no FPU) and drawn with a painter's-algorithm scanline rasterizer and 4x4 ordered dithering, since the display has only 64 colours. The eye, the room and the laser go through the same camera so everything stays in place while it zooms and sways. The regular turret is symmetric, so only its left half is stored (and its antenna, which is on one side only); the watch mirrors it when it loads the mesh. The mesh is only loaded into RAM while the turret is on screen. On the 64 KB watches it takes about 22 KB, with the depth sort's buffers at 4 bytes a triangle.
 
 The voice lines are IMA ADPCM, decoded and mixed on the watch and streamed to the speaker. While a sound plays, the face leaves the CPU idle between frames and pauses for a moment in the middle of long ones, since the speaker is fed in the background. The clips are read from flash 1 KB at a time, and the clip table only once.
 
@@ -81,7 +82,7 @@ The generated files are committed, so this is only needed to change them. The Py
       cp resources/turret~emery.bin resources/turret~gabbro.bin
       venv/bin/python tools/convert_model.py model/scene.gltf resources/turret.bin 650 --legs 0.45
 
-  It poses the rig, removes faces you can't see from outside, simplifies each part, takes face colours from the textures, fixes face winding and finds the eye.
+  It poses the rig, removes faces you can't see from outside, simplifies each part, cuts the body down the middle to store one half, takes face colours from the textures, fixes face winding and finds the eye. The triangle counts are what gets drawn, both halves.
 - **Defective turret** (`resources/turret_defective~emery.bin` and `~gabbro`, `resources/turret_defective.bin`, `resources/closeup_defective~*.bin`): download "Defective Turret - From Portal 2 (Original)" from [Sketchfab](https://sketchfab.com/3d-models/defective-turret-from-portal-2-original-4eca0877381f4208a94c7f43a08ffbdc), unzip it to `defective/`, then
 
       venv/bin/python tools/convert_model.py defective/scene.gltf resources/turret_defective~emery.bin 2000 --profile defective

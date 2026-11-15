@@ -26,6 +26,7 @@ OUT_SCALE = 2          # the PNG is 2x the canvas, for sharp phone screens
 def load(path):
     b = open(path, 'rb').read()
     nv, nt = struct.unpack_from('<HH', b, 4)
+    flags, = struct.unpack_from('<H', b, 10)
     vscale, = struct.unpack_from('<f', b, 12)
     center = struct.unpack_from('<3f', b, 16)
     height, width = struct.unpack_from('<2f', b, 28)
@@ -33,12 +34,21 @@ def load(path):
     eye_r, = struct.unpack_from('<f', b, 48)
     pal = np.frombuffer(b, np.uint8, 64, 100).reshape(16, 4)
     p = 164
-    v = np.frombuffer(b, np.int16, nv * 3, p).reshape(-1, 3) * vscale
-    p += nv * 6
-    t = np.frombuffer(b, np.uint8, nt * 8, p).reshape(-1, 8)
+    mv = mt = 0
+    if flags & 2:  # the start of the mesh is a half to mirror (see convert_model.py)
+        mv, mt = struct.unpack_from('<HH', b, p)
+        p += 4
+    sv, st = nv - mv, nt - mt
+    v = np.frombuffer(b, np.int16, sv * 3, p).reshape(-1, 3) * vscale
+    p += sv * 6
+    t = np.frombuffer(b, np.uint8, st * 8, p).reshape(-1, 8)
     f = t[:, :6].copy().view(np.uint16).reshape(-1, 3).astype(int)
+    col, two = t[:, 6], t[:, 7] & 1
+    v = np.concatenate([v, v[:mv] * [-1, 1, 1]])
+    f = np.concatenate([f, f[:mt, ::-1] + sv])
+    col, two = np.r_[col, col[:mt]], np.r_[two, two[:mt]]
     hdr = dict(center=center, height=height, width=width, eye=eye, eye_r=eye_r)
-    return hdr, v, f, t[:, 6], t[:, 7] & 1, pal
+    return hdr, v, f, col, two, pal
 
 
 # the room, as in render_room() in src/c/main.c

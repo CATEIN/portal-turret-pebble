@@ -56,7 +56,7 @@ function roomFromOld(old) {
 }
 
 function settings() {
-  var s = { showTime: true, dial24: false, volume: 70, seeChance: 25, defectChance: 15, explodeChance: 100, fireChance: 50,
+  var s = { showTime: true, dial24: false, quietSleep: true, volume: 70, seeChance: 25, defectChance: 15, explodeChance: 100, fireChance: 50,
             room: defaultRoom() };
   try {
     var saved = JSON.parse(localStorage.getItem(SETTINGS_KEY));
@@ -65,6 +65,7 @@ function settings() {
     if (saved) {
       if (typeof saved.showTime === 'boolean') s.showTime = saved.showTime;
       if (typeof saved.dial24 === 'boolean') s.dial24 = saved.dial24;
+      if (typeof saved.quietSleep === 'boolean') s.quietSleep = saved.quietSleep;
       if (typeof saved.volume === 'number') s.volume = saved.volume;
       if (typeof saved.seeChance === 'number') s.seeChance = saved.seeChance;
       if (typeof saved.defectChance === 'number') s.defectChance = saved.defectChance;
@@ -100,6 +101,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
   var clean = {
     showTime: !!s.showTime,
     dial24: !!s.dial24,
+    quietSleep: !!s.quietSleep,
     volume: Math.max(0, Math.min(100, Math.round(+s.volume || 0))),
     seeChance: Math.max(0, Math.min(100, Math.round(+s.seeChance || 0))),
     defectChance: Math.max(0, Math.min(100, Math.round(+s.defectChance || 0))),
@@ -112,6 +114,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
   var msg = {
     SHOW_TIME: clean.showTime ? 1 : 0,
     DIAL_24: clean.dial24 ? 1 : 0,
+    QUIET_SLEEP: clean.quietSleep ? 1 : 0,
     VOLUME: clean.volume,
     SEE_CHANCE: clean.seeChance,
     ROOM: clean.room

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Quiet Time:** the turret says goodnight when your watch's Quiet Time starts (Time 2), and a new setting, on by default, keeps flicks from waking it while Quiet Time is on.
+- **Smaller:** the regular turret's model is stored as one half and mirrored on the watch, which makes the app about 30 KB smaller (a fifth of the Round 2 install). The defective turret stays whole.
+
 ## 1.2.0
 
 - **Pebble Time, Time Steel and Time Round** too, as well as the Time 2 and Round 2. They get a lighter 3D model (they give an app half the RAM) and close-ups made for their screens.

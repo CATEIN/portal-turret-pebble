@@ -27,6 +27,7 @@
     "messageKeys": [
       "SHOW_TIME",
       "DIAL_24",
+      "QUIET_SLEEP",
       "VOLUME",
       "ROOM",
       "SEE_CHANCE",

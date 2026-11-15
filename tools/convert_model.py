@@ -8,6 +8,10 @@ usage: convert_model.py path/to/scene.gltf resources/turret.bin [target_tris] [-
 NAME is a profile in tools/models.py (default: turret). --legs simplifies the
 body below height Y (the legs) on its own, so a light mesh doesn't lose them.
 
+The regular turret is symmetric about x = 0, so only its left half is stored,
+and the watch mirrors it (flag FLAG_MIRROR); parts that don't mirror (the
+antenna) are stored whole. target_tris counts the triangles drawn, both halves.
+
 Needs numpy, pillow and fast-simplification.
 """
 import struct
@@ -27,6 +31,8 @@ LEGS = float(sys.argv[sys.argv.index('--legs') + 1]) if '--legs' in sys.argv els
 if LEGS is not None:
     ARGS.remove(sys.argv[sys.argv.index('--legs') + 1])
 TARGET_TRIS = int(ARGS[2]) if len(ARGS) > 2 else 1800
+MIRROR = models.PROFILES[PROFILE]['mirror']
+UNIQUE_ABOVE = models.PROFILES[PROFILE]['unique_above']
 WING_CLOSE = models.PROFILES[PROFILE]['wing_close']  # how far each side panel slides in when closed
 GAIN = models.PROFILES[PROFILE]['gain']
 NPAL = 15             # palette entries for the shell (one more for the eye)
@@ -82,6 +88,55 @@ def visible_faces(v, f):
     return (front + back) > 0
 
 
+def asymmetric_verts(v, rel=0.01):
+    """Vertices whose mirror image (x -> -x) isn't on the model."""
+    m = v * [-1, 1, 1]
+    d = np.empty(len(v))
+    for s in range(0, len(v), 1000):
+        d[s:s + 1000] = np.sqrt(((m[s:s + 1000, None] - v[None]) ** 2).sum(-1)).min(1)
+    return d > rel * (v[:, 1].max() - v[:, 1].min())
+
+
+def clip_left(v, f):
+    """Cut the faces at x = 0 and keep the x <= 0 side. Returns the vertices
+    (new ones on the cut appended), the faces, and each face's source face."""
+    v = list(map(tuple, v))
+    out_f, src = [], []
+    cut = {}
+
+    def on_cut(a, b):
+        key = (min(a, b), max(a, b))
+        if key not in cut:
+            pa, pb = np.array(v[a]), np.array(v[b])
+            t = pa[0] / (pa[0] - pb[0])
+            p = pa + (pb - pa) * t
+            p[0] = 0.0
+            cut[key] = len(v)
+            v.append(tuple(p))
+        return cut[key]
+
+    for i, tri in enumerate(f):
+        side = [np.sign(v[k][0]) for k in tri]   # points on the cut count on both sides
+        if max(side) <= 0:
+            out_f.append(list(tri)); src.append(i)
+            continue
+        if min(side) >= 0:
+            continue
+        # walk the edges, keeping the inside part (a triangle or a quad)
+        poly = []
+        for j in range(3):
+            a, b = tri[j], tri[(j + 1) % 3]
+            if side[j] <= 0:
+                poly.append(a)
+            if side[j] * side[(j + 1) % 3] < 0:
+                poly.append(on_cut(a, b))
+        for j in range(1, len(poly) - 1):
+            out_f.append([poly[0], poly[j], poly[j + 1]]); src.append(i)
+    return np.array(v), np.array(out_f, int), np.array(src, int)
+
+
+
+
 def main():
     src, dst = ARGS[0], ARGS[1]
     v, f, col, emi, grp, fnorm = gltf_load.load(src)
@@ -106,15 +161,34 @@ def main():
     f, col, emi, grp, is_eye, fnorm = (f[keep], col[keep], emi[keep], grp[keep], is_eye[keep],
                                        fnorm[keep])
 
+    # what doesn't mirror is kept whole; of the rest, the right side panel
+    # goes (it's the left one mirrored), and the body is cut down the middle
+    # once it's simplified
+    if MIRROR:
+        asym = asymmetric_verts(v)[f].any(1)
+        unique = asym & (v[f].mean(1)[:, 1] > UNIQUE_ABOVE) if UNIQUE_ABOVE else np.zeros(len(f), bool)
+        keep = unique | (grp != 2)
+        f, col, emi, grp, is_eye, fnorm, unique = (a[keep] for a in (f, col, emi, grp, is_eye, fnorm, unique))
+        print(f'mirrored: {(~unique).sum()} faces, stored whole: {unique.sum()}')
+    else:
+        unique = np.ones(len(f), bool)
+
     # simplify each group separately so panels stay separate parts
-    out_v, out_f, out_col, out_grp, out_vg = [], [], [], [], []
+    out_v, out_f, out_col, out_grp, out_vg, out_half = [], [], [], [], [], []
     centroids = v[f].mean(1)
-    total = len(f)
-    parts = [(gi, grp == gi) for gi in range(3)]
+    total = len(f) + ((grp == 1) & ~unique).sum()   # faces drawn (the left panel twice)
+    # the main part (the half, or the whole model) in groups, legs on their
+    # own if asked; then what's stored whole besides the half
+    main = ~unique if MIRROR else unique
+    parts = [(gi, (grp == gi) & main) for gi in range(3)]
     if LEGS is not None:
         low = centroids[:, 1] < LEGS
-        parts = [(0, (grp == 0) & ~low), (0, (grp == 0) & low)] + parts[1:]
+        parts = [(0, parts[0][1] & ~low), (0, parts[0][1] & low)] + parts[1:]
+    parts = [(gi, m) for gi, m in parts if m.any()]
+    if MIRROR:
+        parts += [(gi, (grp == gi) & unique) for gi in range(3) if ((grp == gi) & unique).any()]
     for gi, m in parts:
+        half = not unique[m][0]
         gf = f[m]
         # weld vertices split at UV seams so the simplifier sees one surface
         key = np.round(v / 1e-4).astype(np.int64)
@@ -126,12 +200,26 @@ def main():
         gv[weld.reshape(-1)] = v
         gv = gv[used]
         gf = inv.reshape(-1, 3)
-        target = max(60, int(TARGET_TRIS * m.sum() / total))
-        reduction = 1.0 - target / len(gf)
-        if reduction > 0:
-            sv, sf = fast_simplification.simplify(gv, gf, target_reduction=reduction, agg=7)
-        else:
-            sv, sf = gv, gf
+        want = min(len(gf), max(60, int(TARGET_TRIS * m.sum() / total)))
+        target = want
+        for _ in range(4):
+            reduction = 1.0 - target / len(gf)
+            if reduction > 0:
+                sv, sf = fast_simplification.simplify(gv, gf, target_reduction=reduction, agg=7)
+            else:
+                sv, sf = gv, gf
+            if not (half and gi == 0):
+                break
+            # the body: keep its left half. Cut after simplifying, so the cut
+            # edge lies exactly on x = 0 and meets its mirror image. Cutting
+            # splits the faces across the middle, so aim lower until the two
+            # halves come to the faces wanted
+            sv, sf, _ = clip_left(sv, sf)
+            used, inv = np.unique(sf, return_inverse=True)
+            sv, sf = sv[used], inv.reshape(-1, 3)
+            if 2 * len(sf) <= want * 1.02:
+                break
+            target = int(target * want / (2 * len(sf)))
         # colour each new face by averaging the nearest original faces at a
         # few points spread over it, so thin dark seams don't take over
         # whole triangles
@@ -168,12 +256,29 @@ def main():
         out_col.append(fcol)
         out_grp.append(np.full(len(sf), gi))
         out_vg.append(np.full(len(sv), gi))
-        print(f'group {gi}: {len(gf)} -> {len(sf)} tris, {len(sv)} verts')
+        out_half.append(half)
+        print(f'group {gi}{" half" if half else ""}: {len(gf)} -> {len(sf)} tris, {len(sv)} verts')
 
-    v = np.concatenate(out_v)
-    f = np.concatenate(out_f).astype(int)
-    col = np.concatenate(out_col).astype(np.float64)
-    vg = np.concatenate(out_vg)
+    # stored: the half's parts, then the whole ones; the watch appends the
+    # mirrored half (the same order is built here to work on the full model)
+    order = [i for i in range(len(out_v)) if out_half[i]] + [i for i in range(len(out_v)) if not out_half[i]]
+    vs, fs, cs, vgs = [], [], [], []
+    base = 0
+    for i in order:
+        fs.append(out_f[i] - sum(len(out_v[j]) for j in range(i)) + base)
+        vs.append(out_v[i]); cs.append(out_col[i]); vgs.append(out_vg[i])
+        base += len(out_v[i])
+    nh = sum(len(out_v[i]) for i in order if out_half[i])     # mirrored verts
+    th = sum(len(out_f[i]) for i in order if out_half[i])     # mirrored tris
+    v_st = np.concatenate(vs)
+    f_st = np.concatenate(fs).astype(int)
+    col_st = np.concatenate(cs).astype(np.float64)
+    vg_st = np.concatenate(vgs)
+    ns = len(v_st)
+    v = np.concatenate([v_st, v_st[:nh] * [-1, 1, 1]])
+    f = np.concatenate([f_st, f_st[:th, ::-1] + ns])
+    col = np.concatenate([col_st, col_st[:th]])
+    vg = np.concatenate([vg_st, np.choose(vg_st[:nh], [0, 2, 1, 3])])
 
     # palette: k-means on face colours; keep the eye red as its own entry
     eye_face = (col[:, 0] > 200) & (col[:, 1] < 80)
@@ -195,6 +300,10 @@ def main():
     fr1, bk1 = seen_sides(v, f, 60, 480)
     fr2, bk2 = seen_sides(vc, f, 60, 480)
     fr, bk = fr1 + fr2, bk1 + bk2
+    # a mirrored face is its half's face, so decide on the pair together
+    m = slice(len(f_st), None)
+    fr[:th] += fr[m]; bk[:th] += bk[m]
+    fr[m], bk[m] = fr[:th], bk[:th]
     flip = bk > 3 * fr
     f[flip] = f[flip][:, ::-1]
     fr[flip], bk[flip] = bk[flip], fr[flip]
@@ -215,13 +324,14 @@ def main():
     width = hi[0] - lo[0]
 
     vscale = np.abs(v).max() / 32000.0
-    vq = np.round(v / vscale).astype(np.int16)
+    vq = np.round(v[:ns] / vscale).astype(np.int16)
 
     group_off = np.zeros((MAX_GROUPS, 3))
     group_off[1] = [-WING_CLOSE, 0, 0]   # left panel opens towards -x
     group_off[2] = [WING_CLOSE, 0, 0]
 
-    hdr = struct.pack('<4sHHBBH', b'TRT1', len(v), len(f), 3, len(pal), 1)  # flags: cull
+    flags = 3 if MIRROR else 1  # cull, mirror
+    hdr = struct.pack('<4sHHBBH', b'TRT1', len(v), len(f), 3, len(pal), flags)
     hdr += struct.pack('<f', vscale)
     hdr += struct.pack('<3f', *center)
     hdr += struct.pack('<ff', height, width)
@@ -232,15 +342,19 @@ def main():
     palb += b'\0' * (64 - len(palb))
     hdr += palb
     assert len(hdr) == 164, len(hdr)
+    if MIRROR:
+        hdr += struct.pack('<HH', nh, th)  # how much of the start mirrors
 
+    nt = len(f_st)
     body = vq.tobytes()
-    for t, p, ds in zip(f, pal_idx, two_sided):
+    for t, p, ds in zip(f[:nt], pal_idx[:nt], two_sided[:nt]):
         body += struct.pack('<3HBB', t[0], t[1], t[2], p, 1 if ds else 0)
-    body += n8.tobytes()
-    body += vg.astype(np.uint8).tobytes()
+    body += n8[:nt].tobytes()
+    body += vg[:ns].astype(np.uint8).tobytes()
 
     open(dst, 'wb').write(hdr + body)
-    print(f'{len(v)} verts, {len(f)} tris, {len(hdr) + len(body)} bytes')
+    print(f'{len(v)} verts, {len(f)} tris drawn; stored {ns} verts, {nt} tris, '
+          f'{len(hdr) + len(body)} bytes')
     print('eye', eye_c, eye_r, 'center', center, 'h', height, 'w', width)
     print('palette', pal)
 

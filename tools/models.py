@@ -9,16 +9,22 @@ the same footing as the regular turret:
               scaling): the stored mesh has them open
   wing_close  how far the panels slide in when closed
   gain        brighten the shell colours (textures are darker than in-game)
+  mirror      store the left half and mirror it on the watch (the defective
+              turret is stored whole: its frame doesn't mirror cleanly)
+  unique_above  faces that don't mirror and sit above this height are stored
+              whole (the regular turret's antenna)
 """
 import numpy as np
 
 PROFILES = {
     # "Portal Turret" by Igrium: panels open in its rest pose
-    'turret': dict(scale=1.0, open=0.0, wing_close=0.17, gain=1.35),
+    'turret': dict(scale=1.0, open=0.0, wing_close=0.17, gain=1.35,
+                   mirror=True, unique_above=1.12),
     # "Defective Turret - From Portal 2 (Original)" by David & 3D: built
     # smaller (scaled so its three feet stand where the regular turret's do;
     # it's a shorter turret), panels closed in its rest pose, a dark bare frame
-    'defective': dict(scale=1.137, open=0.105, wing_close=0.105, gain=2.4),
+    'defective': dict(scale=1.137, open=0.105, wing_close=0.105, gain=2.4,
+                      mirror=False, unique_above=None),
 }
 
 

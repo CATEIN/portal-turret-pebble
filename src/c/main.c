@@ -65,6 +65,7 @@
 #define MAX_PAL 16
 #define PAL_EMISSIVE 0x01
 #define FLAG_CULL 0x0001
+#define FLAG_MIRROR 0x0002  // the stored mesh starts with a half to mirror in x
 
 typedef struct __attribute__((packed)) {
   char magic[4];
@@ -83,6 +84,14 @@ typedef struct __attribute__((packed)) {
   uint8_t pal[MAX_PAL][4];    // r, g, b, flags
 } ModelHeader;                // 164 bytes
 
+// With FLAG_MIRROR, the header is followed by the size of the half at the
+// start of the vertices and triangles; its mirror image is appended on
+// loading. nverts and ntris count the whole model.
+typedef struct __attribute__((packed)) {
+  uint16_t nverts;
+  uint16_t ntris;
+} MirrorHeader;
+
 #define TRI_TWO_SIDED 0x01
 
 typedef struct __attribute__((packed)) {
@@ -93,6 +102,7 @@ typedef struct __attribute__((packed)) {
 
 // The header is tiny and always resident; the rest is loaded on demand.
 static ModelHeader s_hdr;
+static MirrorHeader s_mirror;
 static bool s_hdr_ok;
 static bool s_defective;  // the defective turret (Portal 2) instead of the regular one
 // the regular turret's size and middle: the zoomed-out view is framed by these
@@ -222,7 +232,7 @@ static char s_time_buf[8];
 #define TILE_DARK 0x0F
 
 #define SETTINGS_KEY 1
-#define SETTINGS_VERSION 7
+#define SETTINGS_VERSION 8
 
 typedef struct __attribute__((packed)) {
   uint8_t version;
@@ -234,7 +244,15 @@ typedef struct __attribute__((packed)) {
   uint8_t explode_chance;      // 0..100: % of times a defective one blows up trying to shoot
   uint8_t fire_chance;         // 0..100: % of times it catches fire first (and then blows up)
   uint8_t dial_24;             // the hour hand goes round once a day: a wedge per hour
+  uint8_t quiet_sleep;         // during Quiet Time, flicks don't wake the turret
 } Settings;
+
+// version 7: no Quiet Time setting
+typedef struct __attribute__((packed)) {
+  uint8_t version, show_time, volume;
+  uint8_t room[ROOM_TILES];
+  uint8_t see_chance, defect_chance, explode_chance, fire_chance, dial_24;
+} SettingsV7;
 
 // version 6: small floor tiles
 typedef struct __attribute__((packed)) {
@@ -290,6 +308,7 @@ static void default_settings(void) {
   s_cfg.defect_chance = 15;
   s_cfg.explode_chance = 100;
   s_cfg.fire_chance = 50;
+  s_cfg.quiet_sleep = 1;
   for (int r = 0; r < WALL_ROWS; r++) {
     for (int c = 5; c < WALL_COLS; c++) s_cfg.room[r * WALL_COLS + c] = TILE_DARK;
   }
@@ -324,11 +343,20 @@ static void room_from_old(const uint8_t *old) {
 
 static void load_settings(void) {
   default_settings();
-  union { Settings v7; SettingsV6 v6; SettingsV5 v5; SettingsV4 v4; SettingsV3 v3;
+  union { Settings v8; SettingsV7 v7; SettingsV6 v6; SettingsV5 v5; SettingsV4 v4; SettingsV3 v3;
           SettingsV2 v2; SettingsV1 v1; } saved;
   int n = persist_read_data(SETTINGS_KEY, &saved, sizeof(saved));
-  if (n == (int)sizeof(Settings) && saved.v7.version == SETTINGS_VERSION) {
-    s_cfg = saved.v7;
+  if (n == (int)sizeof(Settings) && saved.v8.version == SETTINGS_VERSION) {
+    s_cfg = saved.v8;
+  } else if (n == (int)sizeof(SettingsV7) && saved.v7.version == 7) {
+    s_cfg.show_time = saved.v7.show_time;
+    s_cfg.volume = saved.v7.volume;
+    memcpy(s_cfg.room, saved.v7.room, ROOM_TILES);
+    s_cfg.see_chance = saved.v7.see_chance;
+    s_cfg.defect_chance = saved.v7.defect_chance;
+    s_cfg.explode_chance = saved.v7.explode_chance;
+    s_cfg.fire_chance = saved.v7.fire_chance;
+    s_cfg.dial_24 = saved.v7.dial_24;
   } else if (n == (int)sizeof(SettingsV6) && saved.v6.version == 6) {
     s_cfg.show_time = saved.v6.show_time;
     s_cfg.volume = saved.v6.volume;
@@ -432,8 +460,8 @@ static bool ensure_model(void) {
   if (!s_hdr_ok) return false;
   audio_pump();
   ResHandle rh = resource_get_handle(MODEL_RES);
-  size_t size = resource_size(rh) - sizeof(ModelHeader);
-  s_body = malloc(size);
+  int nv = s_hdr.nverts, nt = s_hdr.ntris;
+  s_body = malloc(nv * 6 + nt * (sizeof(ModelTri) + 3) + nv);
   s_sv = malloc(sizeof(ScreenVert) * s_hdr.nverts);
   s_items = malloc(sizeof(uint16_t) * s_hdr.ntris);
   s_items_tmp = malloc(sizeof(uint16_t) * s_hdr.ntris);
@@ -449,13 +477,43 @@ static bool ensure_model(void) {
     release_model();
     return false;
   }
-  resource_load_byte_range(rh, sizeof(ModelHeader), s_body, size);
   uint8_t *p = s_body;
-  s_verts = (const int16_t *)p;   p += s_hdr.nverts * 6;
-  s_tris = (const ModelTri *)p;   p += s_hdr.ntris * sizeof(ModelTri);
-  s_normals = (const int8_t *)p;  p += s_hdr.ntris * 3;
-  s_vgroup = p;
+  int16_t *verts = (int16_t *)p;  p += nv * 6;
+  ModelTri *tris = (ModelTri *)p; p += nt * sizeof(ModelTri);
+  int8_t *normals = (int8_t *)p;  p += nt * 3;
+  uint8_t *vgroup = p;
+  // the stored part, then the mirrored half after it
+  int mv = s_mirror.nverts, mt = s_mirror.ntris;
+  int sv = nv - mv, st = nt - mt;
+  uint32_t off = sizeof(ModelHeader) + (s_hdr.flags & FLAG_MIRROR ? sizeof(MirrorHeader) : 0);
+  resource_load_byte_range(rh, off, (uint8_t *)verts, sv * 6);           off += sv * 6;
+  resource_load_byte_range(rh, off, (uint8_t *)tris, st * sizeof(ModelTri)); off += st * sizeof(ModelTri);
+  resource_load_byte_range(rh, off, (uint8_t *)normals, st * 3);         off += st * 3;
+  resource_load_byte_range(rh, off, vgroup, sv);
   audio_pump();
+  for (int i = 0; i < mv; i++) {
+    verts[(sv + i) * 3] = -verts[i * 3];
+    verts[(sv + i) * 3 + 1] = verts[i * 3 + 1];
+    verts[(sv + i) * 3 + 2] = verts[i * 3 + 2];
+    // the left side panel becomes the right one
+    uint8_t g = vgroup[i];
+    vgroup[sv + i] = g == 1 ? 2 : g == 2 ? 1 : g;
+  }
+  for (int i = 0; i < mt; i++) {
+    // mirroring turns the winding around
+    ModelTri *t = &tris[st + i];
+    *t = tris[i];
+    t->v[0] = sv + tris[i].v[0];
+    t->v[1] = sv + tris[i].v[2];
+    t->v[2] = sv + tris[i].v[1];
+    normals[(st + i) * 3] = -normals[i * 3];
+    normals[(st + i) * 3 + 1] = normals[i * 3 + 1];
+    normals[(st + i) * 3 + 2] = normals[i * 3 + 2];
+  }
+  s_verts = verts;
+  s_tris = tris;
+  s_normals = normals;
+  s_vgroup = vgroup;
 
   int32_t sum[MAX_GROUPS][3] = { { 0 } };
   int32_t cnt[MAX_GROUPS] = { 0 };
@@ -473,8 +531,13 @@ static bool ensure_model(void) {
 static void load_header(void) {
   ResHandle rh = resource_get_handle(MODEL_RES);
   resource_load_byte_range(rh, 0, (uint8_t *)&s_hdr, sizeof(ModelHeader));
+  s_mirror = (MirrorHeader) { 0, 0 };
+  if (s_hdr.flags & FLAG_MIRROR) {
+    resource_load_byte_range(rh, sizeof(ModelHeader), (uint8_t *)&s_mirror, sizeof(s_mirror));
+  }
   s_hdr_ok = memcmp(s_hdr.magic, MODEL_MAGIC, 4) == 0
-             && s_hdr.ntris < 0xFFFF;
+             && s_hdr.ntris < 0xFFFF
+             && s_mirror.nverts <= s_hdr.nverts && s_mirror.ntris <= s_hdr.ntris;
 }
 
 // ---------------------------------------------------------------------------
@@ -2492,6 +2555,9 @@ static void schedule_frame(void) {
 
 static void tap_handler(AccelAxisType axis, int32_t direction) {
   if (s_ko || s_spot_boom) return;  // busy being replaced (or blowing up)
+  // asleep for Quiet Time: a flick doesn't wake it (but one that's already
+  // out can still be knocked over)
+  if (!s_out && s_cfg.quiet_sleep && quiet_time_is_active()) return;
   if (s_out && s_zoom_p == 1000) {
     // flicked while it's out: knocked over
     s_ko = true;
@@ -2541,8 +2607,17 @@ static void update_time(struct tm *t) {
   strftime(s_time_buf, sizeof(s_time_buf), clock_is_24h_style() ? "%H:%M" : "%I:%M", &s_now);
 }
 
+// Quiet Time has no event: it's checked every minute
+static bool s_quiet;
+
 static void tick_handler(struct tm *tick_time, TimeUnits changed) {
   update_time(tick_time);
+  bool quiet = quiet_time_is_active();
+  if (quiet && !s_quiet) {
+    // Quiet Time just started: the turret says goodnight
+    say(VOICE_SLEEP_MODE, VOICE_RESTING - VOICE_SLEEP_MODE + 1, VOICE_STANDING_DOWN, 1);
+  }
+  s_quiet = quiet;
   layer_mark_dirty(s_canvas);
 }
 
@@ -2563,6 +2638,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *t;
   if ((t = dict_find(iter, MESSAGE_KEY_SHOW_TIME))) s_cfg.show_time = t->value->int32 != 0;
   if ((t = dict_find(iter, MESSAGE_KEY_DIAL_24))) s_cfg.dial_24 = t->value->int32 != 0;
+  if ((t = dict_find(iter, MESSAGE_KEY_QUIET_SLEEP))) s_cfg.quiet_sleep = t->value->int32 != 0;
   if ((t = dict_find(iter, MESSAGE_KEY_VOLUME))) {
     int32_t v = t->value->int32;
     s_cfg.volume = v < 0 ? 0 : v > 100 ? 100 : v;
@@ -2619,6 +2695,7 @@ static void init(void) {
   app_timer_register(CAPTURE_FRAME_MS, (AppTimerCallback)tap_handler, NULL);
 #endif
 
+  s_quiet = quiet_time_is_active();  // already on: no goodnight
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
   app_message_register_inbox_received(inbox_received);
   app_message_open(256, 16);

@@ -1,6 +1,6 @@
 // The phone settings page, opened as a data: URL from showConfiguration.
 // It returns its result through pebblejs://close# as JSON:
-//   { showTime: bool, dial24: bool, volume: 0..100, room: [bit per tile, 1 = dark] }
+//   { showTime: bool, dial24: bool, quietSleep: bool, volume: 0..100, room: [bit per tile, 1 = dark] }
 //
 // The room is drawn with the same camera as the watch's zoomed-out view
 // (tools/render_view.py), so the tiles line up with what the watch shows.
@@ -317,6 +317,8 @@ var SCRIPT = function () {
   showTime.checked = SETTINGS.showTime;
   var dial24 = document.getElementById('dial24');
   dial24.checked = SETTINGS.dial24;
+  var quietSleep = document.getElementById('quietSleep');
+  quietSleep.checked = SETTINGS.quietSleep;
   volume.value = SETTINGS.volume;
   function volText() {
     volLabel.textContent = +volume.value === 0 ? 'Off' : volume.value + '%';
@@ -339,7 +341,7 @@ var SCRIPT = function () {
   });
 
   document.getElementById('save').onclick = function () {
-    var result = { showTime: showTime.checked, dial24: dial24.checked, volume: +volume.value, seeChance: +seeChance.value,
+    var result = { showTime: showTime.checked, dial24: dial24.checked, quietSleep: quietSleep.checked, volume: +volume.value, seeChance: +seeChance.value,
                    room: room };
     if (!SETTINGS.lite) {
       result.defectChance = +document.getElementById('defectChance').value;
@@ -374,6 +376,11 @@ module.exports = function (settings, view) {
     '<h2>Sounds</h2><div class="card"><div class="row"><span>Volume</span><span id="vol"></span></div>' +
     '<input type="range" id="volume" min="0" max="100" step="10">' +
     '<p class="hint">Voice lines and panel sounds, on Pebble Time 2 only. 0% turns them off.</p></div>' +
+
+    '<h2>Quiet Time</h2><div class="card"><label class="row" for="quietSleep">' +
+    '<span>Sleep during Quiet Time</span><input type="checkbox" id="quietSleep"></label>' +
+    '<p class="hint">While your watch\'s Quiet Time is on, flicking your wrist doesn\'t wake the turret. ' +
+    'Either way, it says goodnight when Quiet Time starts (on Pebble Time 2).</p></div>' +
 
     '<h2>Turret</h2><div class="card"><div class="row"><span>Chance of turret seeing you</span><span id="see"></span></div>' +
     '<input type="range" id="seeChance" min="0" max="100" step="5">' +
